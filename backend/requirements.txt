@@ -48,7 +48,7 @@ torch==2.9.1+cpu
 prophet==1.2.1
 
 # MLOps & Experiment Tracking
-mlflow==3.7.0
+mlflow==3.16.0
 
 # Asynchronous Tasks & Caching
 celery==5.4.0

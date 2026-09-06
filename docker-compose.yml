@@ -14,6 +14,8 @@ services:
     volumes:
       - uploads:/app/uploads
       - mlflow_data:/app/mlops
+      - storage_data:/app/storage
+      - models_data:/app/models
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 10s
@@ -43,14 +45,16 @@ services:
       retries: 3
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow
+    image: ghcr.io/mlflow/mlflow:v3.16.0
     ports:
       - "5000:5000"
-    command: mlflow server --backend-store-uri file:/mlflow --default-artifact-root file:/mlflow --host 0.0.0.0 --port 5000
+    environment:
+      - MLFLOW_ALLOW_FILE_STORE=true
+    command: mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root /mlflow --host 0.0.0.0 --port 5000 --allowed-hosts "*"
     volumes:
       - mlflow_data:/mlflow
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -60,3 +64,5 @@ volumes:
   redis_data:
   mlflow_data:
   uploads:
+  storage_data:
+  models_data:

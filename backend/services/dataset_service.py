@@ -7,6 +7,7 @@ import aiofiles
 import pandas as pd
 from ..schemas.dataset import DatasetInfo, DatasetUploadRequest
 from ..utils.config import settings
+from ..utils.storage import datasets_storage
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,12 @@ logger = logging.getLogger(__name__)
 
 class DatasetService:
     def __init__(self):
-        self.datasets = []  # In-memory storage for demo
+        pass
+
+    @property
+    def datasets(self) -> List[DatasetInfo]:
+        """List of uploaded datasets, backed by persistent SQL storage."""
+        return [DatasetInfo(**d) for d in datasets_storage.all()]
 
     async def upload_dataset(
         self, file: UploadFile, request: DatasetUploadRequest
@@ -71,8 +77,8 @@ class DatasetService:
             column_names=column_names,
         )
 
-        # Store in memory (in real app, save to DB)
-        self.datasets.append(dataset)
+        # Persist to database
+        datasets_storage.add(dataset.model_dump())
 
         logger.info(f"Dataset {request.name} uploaded: {rows} rows, {columns} columns")
         return dataset
@@ -83,30 +89,26 @@ class DatasetService:
 
     def get_dataset_by_id(self, dataset_id: str) -> Optional[DatasetInfo]:
         """Get dataset by ID."""
-        for dataset in self.datasets:
-            if dataset.id == dataset_id:
-                return dataset
-        return None
+        data = datasets_storage.get(dataset_id)
+        return DatasetInfo(**data) if data else None
 
     def get_dataset(self, dataset_id: str) -> Optional[DatasetInfo]:
         """Alias for get_dataset_by_id."""
         return self.get_dataset_by_id(dataset_id)
 
     def delete_dataset(self, dataset_id: str) -> bool:
-        """Delete a dataset from memory and disk."""
-        for i, dataset in enumerate(self.datasets):
-            if dataset.id == dataset_id:
-                if os.path.exists(dataset.file_path):
-                    try:
-                        os.remove(dataset.file_path)
-                    except OSError as e:
-                        logger.warning(
-                            f"Could not remove file {dataset.file_path}: {e}"
-                        )
-                self.datasets.pop(i)
-                logger.info(f"Dataset {dataset_id} deleted")
-                return True
-        return False
+        """Delete a dataset from persistent storage and disk."""
+        dataset = self.get_dataset_by_id(dataset_id)
+        if not dataset:
+            return False
+        if os.path.exists(dataset.file_path):
+            try:
+                os.remove(dataset.file_path)
+            except OSError as e:
+                logger.warning(f"Could not remove file {dataset.file_path}: {e}")
+        datasets_storage.delete(dataset_id)
+        logger.info(f"Dataset {dataset_id} deleted")
+        return True
 
     def get_dataset_columns(self, dataset_id: str) -> List[str]:
         """Retrieve the column names of a dataset."""
@@ -117,7 +119,7 @@ class DatasetService:
             df = self.load_dataset_file(dataset_id)
             cols = [str(c) for c in df.columns.tolist()]
             if dataset:
-                dataset.column_names = cols
+                datasets_storage.update(dataset_id, {"column_names": cols})
             return cols
         except Exception as e:
             logger.error(f"Failed to extract columns for dataset {dataset_id}: {e}")

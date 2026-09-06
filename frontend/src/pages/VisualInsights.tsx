@@ -25,6 +25,8 @@ const VisualInsights: React.FC = () => {
     const [chartLoading, setChartLoading] = useState(false);
     const [correlationData, setCorrelationData] = useState<any>(null);
     const [trendData, setTrendData] = useState<any>(null);
+    const [trendError, setTrendError] = useState<string | null>(null);
+    const [correlationError, setCorrelationError] = useState<string | null>(null);
     const { addToast } = useToast();
 
     useEffect(() => {
@@ -48,14 +50,23 @@ const VisualInsights: React.FC = () => {
         setChartLoading(true);
         try {
             if (activeTab === 'correlation') {
+                setCorrelationError(null);
                 const data = await getCorrelation(selectedDatasetId);
                 setCorrelationData(data);
             } else if (activeTab === 'trends') {
+                setTrendError(null);
                 const data = await getTrend(selectedDatasetId);
                 setTrendData(data);
             }
-        } catch {
-            // Silently handle — show empty state
+        } catch (err: any) {
+            const message = err?.response?.data?.error?.message;
+            if (activeTab === 'correlation') {
+                setCorrelationData(null);
+                setCorrelationError(message || 'Failed to load correlation data');
+            } else if (activeTab === 'trends') {
+                setTrendData(null);
+                setTrendError(message || 'Failed to load trend data');
+            }
         } finally {
             setChartLoading(false);
         }
@@ -112,7 +123,7 @@ const VisualInsights: React.FC = () => {
         if (!trendData || !Plot) {
             return (
                 <div className={styles.chartEmpty}>
-                    <p>No trend data available for this dataset</p>
+                    <p>{trendError || 'No trend data available for this dataset'}</p>
                 </div>
             );
         }
@@ -148,7 +159,7 @@ const VisualInsights: React.FC = () => {
         if (!correlationData || !Plot) {
             return (
                 <div className={styles.chartEmpty}>
-                    <p>No correlation data available for this dataset</p>
+                    <p>{correlationError || 'No correlation data available for this dataset'}</p>
                 </div>
             );
         }
