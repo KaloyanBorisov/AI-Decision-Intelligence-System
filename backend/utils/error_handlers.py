@@ -178,11 +178,18 @@ def log_error(
     log_message = " | ".join(log_parts)
 
     # Log with appropriate level
-    if isinstance(error, (ValidationError, ResourceNotFoundError)):
-        logger.warning(log_message)
-    elif isinstance(error, (AuthenticationError, AuthorizationError)):
+    if isinstance(error, (AuthenticationError, AuthorizationError)):
         logger.warning(log_message, extra={"security": True})
+    elif isinstance(error, (ValidationError, ResourceNotFoundError)):
+        logger.warning(log_message)
+    elif isinstance(error, (DeciseraException, HTTPException)) and (
+        400 <= getattr(error, "status_code", 500) < 500
+    ):
+        # Expected client errors (bad input, not-found, unsupported operation, ...):
+        # a one-line warning is enough, a full traceback is just noise.
+        logger.warning(log_message)
     else:
+        # Unexpected server-side failures: keep the full traceback.
         logger.error(log_message, exc_info=True)
 
 

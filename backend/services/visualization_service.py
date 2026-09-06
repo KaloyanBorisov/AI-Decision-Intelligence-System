@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Any, Optional
 import pandas as pd
 from ..visualizations import (
@@ -9,6 +10,16 @@ from ..visualizations import (
 )
 from ..ml.data_ingestion import DataIngestion
 from .dataset_service import dataset_service
+
+logger = logging.getLogger(__name__)
+
+
+class DatasetNotFoundError(Exception):
+    """Raised when the requested dataset does not exist."""
+
+
+class NotTimeSeriesError(Exception):
+    """Raised when a dataset exists but has no usable date/target columns for a trend chart."""
 
 
 class VisualizationService:
@@ -42,11 +53,18 @@ class VisualizationService:
         return plot.generate_plot()
 
     def get_trend_analysis(self, dataset_id: str) -> Optional[Dict[str, Any]]:
+        """Build a trend chart for a dataset.
+
+        Raises:
+            DatasetNotFoundError: no dataset with this id exists.
+            NotTimeSeriesError: the dataset exists but has no date column
+                and/or no usable numeric target for a trend chart.
+        """
         dataset = next(
             (d for d in dataset_service.datasets if d.id == dataset_id), None
         )
         if not dataset:
-            return None
+            raise DatasetNotFoundError(dataset_id)
         try:
             df = DataIngestion.load_data(dataset.file_path)
             profile = getattr(dataset, "profile", {}) or {}
@@ -66,11 +84,20 @@ class VisualizationService:
                     date_col = col
                     break
             if not date_col or not target:
-                return None
+                raise NotTimeSeriesError(
+                    f"Dataset {dataset_id} has no date column and/or no numeric "
+                    f"target (date_col={date_col!r}, target={target!r})"
+                )
             chart = TrendAnalysisChart(df, date_col, target)
             return chart.generate_plot()
-        except Exception as e:
-            return None
+        except (DatasetNotFoundError, NotTimeSeriesError):
+            raise
+        except Exception:
+            logger.exception(
+                "Unexpected error generating trend analysis for dataset %s",
+                dataset_id,
+            )
+            raise
 
     def get_forecast_plot(
         self, model_id: str, dataset_id: str

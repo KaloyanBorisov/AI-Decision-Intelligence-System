@@ -12,21 +12,166 @@ from pathlib import Path
 import joblib
 
 from ..utils.cache import cache_get, cache_set, cache_delete
+from ..utils.storage import models_storage
 from ..services.dataset_service import dataset_service
 
 logger = logging.getLogger(__name__)
+
+
+class ModelRegistry:
+    """Dict-compatible model registry backed by persistent metadata + joblib files.
+
+    Trained models carry live Python objects (the fitted AutoML wrapper, a SHAP
+    explainer, a sampled training DataFrame) that can't be stored in SQL directly.
+    Instead, on `registry[model_id] = info` those objects are dumped to disk via
+    joblib and only their metadata (paths, scores, feature names, ...) is persisted.
+    On lookup, if the objects aren't already cached in this process, they're
+    lazily reloaded from disk. This means a trained model survives a backend
+    restart or container recreation, as long as its model directory is on a
+    persistent volume.
+    """
+
+    def __init__(self, model_dir: Path):
+        self.model_dir = model_dir
+        self._cache: Dict[str, Dict[str, Any]] = {}
+
+    def __setitem__(self, model_id: str, info: Dict[str, Any]) -> None:
+        automl = info.get("automl")
+        model = info.get("model")
+        X_sample = info.get("X_sample")
+
+        automl_path = ""
+        model_path = ""
+        if automl is not None:
+            automl_path = str(self.model_dir / f"{model_id}_automl.joblib")
+            joblib.dump(automl, automl_path)
+        elif model is not None:
+            model_path = str(self.model_dir / f"{model_id}_model.joblib")
+            joblib.dump(model, model_path)
+
+        xsample_path = ""
+        if X_sample is not None:
+            xsample_path = str(self.model_dir / f"{model_id}_xsample.joblib")
+            joblib.dump(X_sample, xsample_path)
+
+        models_storage.upsert(
+            model_id,
+            {
+                "dataset_id": info.get("dataset_id", ""),
+                "target_column": info.get("target_column", ""),
+                "task_type": info.get("task_type", "classification"),
+                "best_model_name": info.get("best_model_name", "AutoML"),
+                "best_score": info.get("best_score", 0.0),
+                "feature_names": info.get("feature_names", []),
+                "all_results": info.get("all_results", {}),
+                "created_at": info.get("created_at", datetime.utcnow().isoformat()),
+                "automl_path": automl_path,
+                "model_path": model_path,
+                "xsample_path": xsample_path,
+            },
+        )
+        self._cache[model_id] = info
+
+    def _load(self, model_id: str) -> Optional[Dict[str, Any]]:
+        data = models_storage.get(model_id)
+        if not data:
+            return None
+
+        automl = None
+        model = None
+        if data.get("automl_path") and Path(data["automl_path"]).exists():
+            try:
+                automl = joblib.load(data["automl_path"])
+                model = automl.best_model
+            except Exception as e:
+                logger.error(f"Failed to reload AutoML for model {model_id}: {e}")
+        elif data.get("model_path") and Path(data["model_path"]).exists():
+            try:
+                model = joblib.load(data["model_path"])
+            except Exception as e:
+                logger.error(f"Failed to reload model {model_id}: {e}")
+
+        X_sample = None
+        if data.get("xsample_path") and Path(data["xsample_path"]).exists():
+            try:
+                X_sample = joblib.load(data["xsample_path"])
+            except Exception as e:
+                logger.warning(f"Failed to reload X_sample for model {model_id}: {e}")
+
+        explainer = None
+        if model is not None and X_sample is not None:
+            try:
+                from ..ml.explainability import ModelExplainer
+
+                explainer = ModelExplainer(model, X_train=X_sample)
+            except Exception as e:
+                logger.warning(
+                    f"Could not reconstruct SHAP explainer for model {model_id}: {e}"
+                )
+
+        entry = {
+            "automl": automl,
+            "model": model,
+            "explainer": explainer,
+            "X_sample": X_sample,
+            "feature_names": data.get("feature_names", []),
+            "dataset_id": data.get("dataset_id", ""),
+            "target_column": data.get("target_column", ""),
+            "task_type": data.get("task_type", "classification"),
+            "best_model_name": data.get("best_model_name", "AutoML"),
+            "best_score": data.get("best_score", 0.0),
+            "all_results": data.get("all_results", {}),
+            "created_at": data.get("created_at", ""),
+        }
+        self._cache[model_id] = entry
+        return entry
+
+    def __getitem__(self, model_id: str) -> Dict[str, Any]:
+        if model_id in self._cache:
+            return self._cache[model_id]
+        entry = self._load(model_id)
+        if entry is None:
+            raise KeyError(model_id)
+        return entry
+
+    def get(self, model_id: str, default=None):
+        try:
+            return self[model_id]
+        except KeyError:
+            return default
+
+    def __contains__(self, model_id: str) -> bool:
+        if model_id in self._cache:
+            return True
+        return models_storage.get(model_id) is not None
+
+    def __delitem__(self, model_id: str) -> None:
+        self._cache.pop(model_id, None)
+        data = models_storage.get(model_id)
+        models_storage.delete(model_id)
+        if data:
+            for key in ("automl_path", "model_path", "xsample_path"):
+                path = data.get(key)
+                if path and Path(path).exists():
+                    try:
+                        Path(path).unlink()
+                    except OSError as e:
+                        logger.warning(f"Could not remove {path}: {e}")
+
+    def items(self):
+        for row in models_storage.all():
+            model_id = row["model_id"]
+            yield model_id, self[model_id]
 
 
 class ModelService:
     """Service for managing model training, inference, and explanations"""
 
     def __init__(self):
-        self.models = (
-            {}
-        )  # In-memory model cache: {model_id: {model, explainer, metadata}}
-        self.tasks = {}  # Task status tracking
         self.model_dir = Path("models")
         self.model_dir.mkdir(exist_ok=True)
+        self.models = ModelRegistry(self.model_dir)
+        self.tasks = {}  # Task status tracking
 
     def get_dataset(self, dataset_id: str) -> pd.DataFrame:
         """Load dataset from service"""
@@ -332,14 +477,19 @@ class ModelService:
         return plot_data
 
     def list_models(self) -> List[Dict[str, Any]]:
-        """List all trained models with complete summary metadata"""
+        """List all trained models with complete summary metadata.
+
+        Reads metadata directly from persistent storage rather than through
+        `self.models`, so listing doesn't force every model's joblib file
+        (AutoML object, SHAP sample, ...) to be loaded into memory.
+        """
         models_list = []
-        for model_id, info in self.models.items():
+        for info in models_storage.all():
             best_score = float(info.get("best_score", 0.0) or 0.0)
             task_type = info.get("task_type", "classification")
             models_list.append(
                 {
-                    "model_id": model_id,
+                    "model_id": info["model_id"],
                     "model_type": info.get("best_model_name", "AutoML"),
                     "best_model": info.get("best_model_name", "AutoML"),
                     "dataset_id": info.get("dataset_id", ""),
@@ -359,19 +509,10 @@ class ModelService:
         return models_list
 
     def delete_model(self, model_id: str):
-        """Delete a model"""
+        """Delete a model, its metadata, and its files on disk."""
         if model_id in self.models:
-            # Delete from memory
             del self.models[model_id]
-
-            # Delete from disk
-            model_path = self.model_dir / f"{model_id}.joblib"
-            if model_path.exists():
-                model_path.unlink()
-
-            # Clear cache
             cache_delete(f"model:{model_id}")
-
             logger.info(f"Model {model_id} deleted")
 
 
