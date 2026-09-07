@@ -2,10 +2,44 @@
 
 from ..utils.config import settings
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "gemini-3.6-flash"
+
+
+def _build_workspace_context() -> str:
+    """Summarize the user's actual datasets and models for grounding.
+
+    Without this, the LLM has no knowledge of what's really in the
+    workspace and will confidently invent plausible-sounding models and
+    datasets instead of reporting real ones.
+    """
+    try:
+        from .tools import copilot_tools
+
+        datasets = copilot_tools.list_available_datasets()
+        models = copilot_tools.list_available_models()
+
+        if not datasets and not models:
+            return "The workspace currently has no datasets or trained models."
+
+        parts = []
+        if datasets:
+            parts.append("Datasets:\n" + json.dumps(datasets, default=str, indent=2))
+        else:
+            parts.append("Datasets: none uploaded yet.")
+
+        if models:
+            parts.append("Trained models:\n" + json.dumps(models, default=str, indent=2))
+        else:
+            parts.append("Trained models: none trained yet.")
+
+        return "\n\n".join(parts)
+    except Exception as e:
+        logger.warning(f"Failed to build workspace context for copilot: {e}")
+        return "Workspace data is currently unavailable."
 
 
 class AICopilotAgent:
@@ -59,10 +93,22 @@ class AICopilotAgent:
             # Create model fresh each time
             model = genai.GenerativeModel(DEFAULT_MODEL_NAME)
 
-            # Create system context + user question
-            prompt = f"""You are a helpful AI assistant for a data analytics platform called Decisera. 
-You help users understand their datasets, models, and analytics results. 
+            # Ground the model in the user's actual workspace data so it
+            # reports real datasets/models instead of inventing plausible
+            # ones.
+            workspace_context = _build_workspace_context()
+
+            prompt = f"""You are a helpful AI assistant for a data analytics platform called Decisera.
+You help users understand their datasets, models, and analytics results.
 Provide clear, concise, and accurate responses.
+
+Only use the workspace data below to answer questions about datasets or
+models — never invent dataset or model names, metrics, or dates that
+aren't present in it. If something the user asks about isn't in this
+data, say so plainly instead of guessing.
+
+Workspace data:
+{workspace_context}
 
 User question: {user_input}"""
 

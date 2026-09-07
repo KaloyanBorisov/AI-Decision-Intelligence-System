@@ -175,9 +175,20 @@ class CopilotTools:
             List of dataset info
         """
         try:
-            datasets = []
-            # Mock implementation - would query dataset service
-            return datasets
+            return [
+                {
+                    "dataset_id": ds.id,
+                    "name": ds.name,
+                    "description": ds.description,
+                    "rows": ds.rows,
+                    "columns": ds.columns,
+                    "column_names": ds.column_names,
+                    "created_at": ds.created_at.isoformat()
+                    if hasattr(ds.created_at, "isoformat")
+                    else str(ds.created_at),
+                }
+                for ds in dataset_service.list_datasets()
+            ]
         except Exception as e:
             logger.error(f"Failed to list datasets: {e}")
             return []
