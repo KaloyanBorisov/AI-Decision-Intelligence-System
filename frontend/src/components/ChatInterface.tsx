@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { askCopilot } from '../services/copilotService';
+import { askCopilot, ChatTurn } from '../services/copilotService';
 import { useToast } from '../context/ToastProvider';
 import { Sparkles, Send, User } from 'lucide-react';
 import styles from './ChatInterface.module.css';
@@ -45,12 +45,23 @@ const ChatInterface: React.FC = () => {
             timestamp: new Date()
         };
 
+        // Snapshot prior turns as conversation history before adding the new
+        // user message, so follow-ups ("what's its accuracy?") can resolve
+        // against what was actually said earlier — excluding error bubbles,
+        // which aren't real model turns.
+        const history: ChatTurn[] = messages
+            .filter(m => !m.id.startsWith('error-'))
+            .map(m => ({
+                role: m.sender === 'user' ? 'user' : 'assistant',
+                content: m.text,
+            }));
+
         setMessages(prev => [...prev, userMessage]);
         setInput('');
         setLoading(true);
 
         try {
-            const response = await askCopilot(text);
+            const response = await askCopilot(text, undefined, undefined, 2, undefined, history);
             const botMessage: Message = {
                 id: `bot-${Date.now()}`,
                 text: response.answer,

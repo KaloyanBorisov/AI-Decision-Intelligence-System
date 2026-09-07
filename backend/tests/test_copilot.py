@@ -140,6 +140,64 @@ class TestCopilotAgent:
 
             assert "Permission denied" in result
 
+    def test_query_includes_history_for_multiturn_context(self):
+        """Prior turns are forwarded to the LLM so follow-up questions resolve correctly."""
+        with patch("backend.copilot.agent.settings") as mock_settings, patch(
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
+
+            mock_settings.anthropic_api_key = "mock-valid-key"
+
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.content = [_mock_text_block("It's 0.98 accuracy.")]
+            mock_client.messages.create.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            agent = AICopilotAgent()
+            history = [
+                {"role": "user", "content": "Tell me about the housing model"},
+                {"role": "assistant", "content": "It's an XGBoost classifier."},
+            ]
+            result = agent.query("What's its accuracy?", history=history)
+
+            assert result == "It's 0.98 accuracy."
+            call_kwargs = mock_client.messages.create.call_args.kwargs
+            sent_messages = call_kwargs["messages"]
+            assert sent_messages[0] == history[0]
+            assert sent_messages[1] == history[1]
+            assert sent_messages[2]["role"] == "user"
+            assert "What's its accuracy?" in sent_messages[2]["content"]
+
+    def test_query_normalizes_consecutive_same_role_turns(self):
+        """Two consecutive user turns in history (e.g. after a dropped error turn)
+        are merged rather than sent as-is, since Anthropic requires strict
+        user/assistant alternation."""
+        with patch("backend.copilot.agent.settings") as mock_settings, patch(
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
+
+            mock_settings.anthropic_api_key = "mock-valid-key"
+
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.content = [_mock_text_block("Answer.")]
+            mock_client.messages.create.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            agent = AICopilotAgent()
+            # Two consecutive "user" turns, as could happen if an assistant
+            # turn errored out and was dropped from history.
+            history = [{"role": "user", "content": "First question"}]
+            agent.query("Second question", history=history)
+
+            call_kwargs = mock_client.messages.create.call_args.kwargs
+            sent_messages = call_kwargs["messages"]
+            roles = [m["role"] for m in sent_messages]
+            # No two consecutive entries share a role
+            assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1))
+            assert roles[0] == "user"
+
     def test_copilot_proxy_and_singleton(self):
         """Verify proxy forwards queries correctly."""
         proxy = CopilotAgentProxy()

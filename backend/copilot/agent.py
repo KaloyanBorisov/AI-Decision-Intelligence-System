@@ -19,6 +19,30 @@ present in it. If something the user asks about isn't in this data, say so
 plainly instead of guessing."""
 
 
+def _normalize_messages(messages: list) -> list:
+    """Coerce a message list into Anthropic's required strict alternation.
+
+    History assembled from a chat UI can end up with two consecutive
+    "user" turns — e.g. a prior turn errored out and was dropped, or the
+    client sends slightly malformed history — which the API rejects
+    outright. Merge consecutive same-role turns instead of erroring.
+    """
+    normalized: list = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role not in ("user", "assistant") or not content:
+            continue
+        if normalized and normalized[-1]["role"] == role:
+            normalized[-1]["content"] += f"\n\n{content}"
+        else:
+            normalized.append({"role": role, "content": content})
+    # Anthropic requires the conversation to start with a "user" turn.
+    while normalized and normalized[0]["role"] != "user":
+        normalized.pop(0)
+    return normalized
+
+
 def _build_workspace_context() -> str:
     """Summarize the user's actual datasets and models for grounding.
 
@@ -74,12 +98,16 @@ class AICopilotAgent:
             logger.error(f"Failed to create copilot client: {type(e).__name__}: {e}")
             self.client = None
 
-    def query(self, user_input: str) -> str:
+    def query(self, user_input: str, history: list = None) -> str:
         """
         Process user query and return response.
 
         Args:
             user_input: The user's question
+            history: Prior turns of this conversation, oldest first, as
+                {"role": "user"|"assistant", "content": str} dicts — lets
+                follow-up questions ("what's its accuracy?") resolve against
+                what was actually said earlier in the chat.
 
         Returns:
             AI-generated response string
@@ -97,7 +125,9 @@ class AICopilotAgent:
 
             # Ground the model in the user's actual workspace data so it
             # reports real datasets/models instead of inventing plausible
-            # ones.
+            # ones. Only the latest turn carries this — it can go stale
+            # across a long conversation, but repeating it on every prior
+            # turn would waste tokens for no benefit.
             workspace_context = _build_workspace_context()
 
             user_message = f"""Workspace data:
@@ -105,12 +135,16 @@ class AICopilotAgent:
 
 User question: {user_input}"""
 
+            messages = _normalize_messages(
+                list(history or []) + [{"role": "user", "content": user_message}]
+            )
+
             # Get response from Claude
             response = client.messages.create(
                 model=DEFAULT_MODEL_NAME,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
+                messages=messages,
             )
             return "".join(
                 block.text for block in response.content if block.type == "text"
@@ -181,9 +215,9 @@ def get_copilot_agent() -> AICopilotAgent:
 class CopilotAgentProxy:
     """Proxy class that lazily initializes the copilot agent"""
 
-    def query(self, user_input: str) -> str:
+    def query(self, user_input: str, history: list = None) -> str:
         """Forward query to the lazily-initialized agent"""
-        return get_copilot_agent().query(user_input)
+        return get_copilot_agent().query(user_input, history)
 
 
 # Export the proxy as copilot_agent for backward compatibility

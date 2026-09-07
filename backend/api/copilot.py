@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class ChatTurn(BaseModel):
+    role: str = Field(..., description="'user' or 'assistant'")
+    content: str = Field(..., max_length=4000)
+
+
 class CopilotQuery(BaseModel):
     question: str = Field(
         ..., min_length=1, max_length=2000, description="User's question"
@@ -20,6 +25,10 @@ class CopilotQuery(BaseModel):
     model_id: Optional[str] = Field(None, description="Optional model context")
     context: Dict[str, Any] = Field(
         default_factory=dict, description="Additional context"
+    )
+    history: List[ChatTurn] = Field(
+        default_factory=list,
+        description="Prior turns of this conversation, oldest first, for multi-turn context",
     )
 
 
@@ -94,6 +103,15 @@ async def ask_copilot(request: Request, query: CopilotQuery):
         # Prepend context to question if available
         full_question = f"{context_str}{question}" if context_str else question
 
+        # Cap history so a runaway client-sent payload can't blow up the
+        # prompt size; only the most recent turns matter for context anyway.
+        MAX_HISTORY_TURNS = 20
+        history = [
+            {"role": turn.role, "content": turn.content}
+            for turn in query.history[-MAX_HISTORY_TURNS:]
+            if turn.role in ("user", "assistant")
+        ]
+
         # Import and use the copilot agent
         try:
             from ..copilot.agent import copilot_agent
@@ -102,7 +120,9 @@ async def ask_copilot(request: Request, query: CopilotQuery):
             # call is blocking, and running it inline here would stall the
             # entire async server (all other requests) for the duration of
             # the call.
-            answer = await run_in_threadpool(copilot_agent.query, full_question)
+            answer = await run_in_threadpool(
+                copilot_agent.query, full_question, history
+            )
 
             # Extract metadata if available
             sources = ["AI Copilot", "System Data"]

@@ -1,10 +1,16 @@
 import api from './api';
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface CopilotRequest {
   question: string;
   dataset_id?: string;
   model_id?: string;
   context?: Record<string, any>;
+  history?: ChatTurn[];
 }
 
 export interface CopilotResponse {
@@ -33,12 +39,14 @@ export const askCopilot = async (
   datasetId?: string,
   modelId?: string,
   retries: number = 2,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  history?: ChatTurn[]
 ): Promise<CopilotResponse> => {
   const request: CopilotRequest = {
     question,
     dataset_id: datasetId,
     model_id: modelId,
+    history,
   };
 
   let lastError: Error | null = null;
