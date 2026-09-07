@@ -82,7 +82,7 @@ Decisera is built with a decoupled, cloud-native client-server architecture:
             ▼                                     ▼
 ┌───────────────────────────────┐   ┌───────────────────────────────┐
 │     AutoML & Analytics Engine │   │   AI Copilot & Monitoring     │
-│  - Scikit-learn, XGBoost      │   │  - Google Gemini Generative AI│
+│  - Scikit-learn, XGBoost      │   │  - Anthropic Claude            │
 │  - LightGBM, CatBoost         │   │  - MLflow Experiment Lineage  │
 │  - Prophet, PyTorch LSTM      │   │  - Prometheus /metrics        │
 │  - Optuna Hyperparameter Tuner│   │  - Grafana Pre-built Panels   │
@@ -134,7 +134,7 @@ cp .env.example .env
 
 # Configure required keys in .env:
 # - SECRET_KEY & JWT_SECRET_KEY (generate via: python -c "import secrets; print(secrets.token_urlsafe(32))")
-# - GOOGLE_API_KEY (optional, for Gemini AI Copilot)
+# - ANTHROPIC_API_KEY (optional, for Claude AI Copilot)
 # - ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
 
 # Launch FastAPI backend with hot-reload

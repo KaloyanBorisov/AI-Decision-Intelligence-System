@@ -1,4 +1,4 @@
-"""AI Copilot Agent using Google Generative AI directly (no langchain)"""
+"""AI Copilot Agent using the Anthropic API directly (no langchain)"""
 
 from ..utils.config import settings
 import logging
@@ -6,7 +6,17 @@ import json
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_NAME = "gemini-3.6-flash"
+DEFAULT_MODEL_NAME = "claude-sonnet-5"
+MAX_TOKENS = 1024
+
+SYSTEM_PROMPT = """You are a helpful AI assistant for a data analytics platform called Decisera.
+You help users understand their datasets, models, and analytics results.
+Provide clear, concise, and accurate responses.
+
+Only use the workspace data given to you to answer questions about datasets or
+models — never invent dataset or model names, metrics, or dates that aren't
+present in it. If something the user asks about isn't in this data, say so
+plainly instead of guessing."""
 
 
 def _build_workspace_context() -> str:
@@ -44,30 +54,25 @@ def _build_workspace_context() -> str:
 
 class AICopilotAgent:
     def __init__(self):
-        """Initialize the AI Copilot with Google Gemini."""
-        self.model = None
+        """Initialize the AI Copilot with Anthropic Claude."""
+        self.client = None
 
         try:
             # Check if API key is available
-            if not settings.google_api_key:
-                logger.warning("Google API key is not set in environment")
+            if not settings.anthropic_api_key:
+                logger.warning("Anthropic API key is not set in environment")
                 return
 
             # Lazy import to avoid blocking app startup with heavy module load
-            import google.generativeai as genai
+            import anthropic
 
-            # Configure Google Generative AI
-            genai.configure(api_key=settings.google_api_key)
+            self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-            # Create the model - gemini-3.6-flash
-            # Don't test it during init - just create it
-            self.model = genai.GenerativeModel(DEFAULT_MODEL_NAME)
-
-            logger.info("✓ AI Copilot model created (will be tested on first use)")
+            logger.info("✓ AI Copilot client created (will be tested on first use)")
 
         except Exception as e:
-            logger.error(f"Failed to create copilot model: {type(e).__name__}: {e}")
-            self.model = None
+            logger.error(f"Failed to create copilot client: {type(e).__name__}: {e}")
+            self.client = None
 
     def query(self, user_input: str) -> str:
         """
@@ -81,40 +86,35 @@ class AICopilotAgent:
         """
         try:
             # Check if API key is available
-            if not settings.google_api_key:
-                return "AI Copilot requires a Google API key to be configured. Please set GOOGLE_API_KEY in your environment."
+            if not settings.anthropic_api_key:
+                return "AI Copilot requires an Anthropic API key to be configured. Please set ANTHROPIC_API_KEY in your environment."
 
             # Lazy import (deferred from module level to avoid blocking startup)
-            import google.generativeai as genai
+            import anthropic
 
-            # Reconfigure API on each request to avoid caching issues
-            genai.configure(api_key=settings.google_api_key)
-
-            # Create model fresh each time
-            model = genai.GenerativeModel(DEFAULT_MODEL_NAME)
+            # Create client fresh each time to avoid caching issues
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
             # Ground the model in the user's actual workspace data so it
             # reports real datasets/models instead of inventing plausible
             # ones.
             workspace_context = _build_workspace_context()
 
-            prompt = f"""You are a helpful AI assistant for a data analytics platform called Decisera.
-You help users understand their datasets, models, and analytics results.
-Provide clear, concise, and accurate responses.
-
-Only use the workspace data below to answer questions about datasets or
-models — never invent dataset or model names, metrics, or dates that
-aren't present in it. If something the user asks about isn't in this
-data, say so plainly instead of guessing.
-
-Workspace data:
+            user_message = f"""Workspace data:
 {workspace_context}
 
 User question: {user_input}"""
 
-            # Get response from Gemini
-            response = model.generate_content(prompt)
-            return response.text
+            # Get response from Claude
+            response = client.messages.create(
+                model=DEFAULT_MODEL_NAME,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            return "".join(
+                block.text for block in response.content if block.type == "text"
+            )
 
         except Exception as e:
             # Log the full error for debugging
@@ -123,41 +123,28 @@ User question: {user_input}"""
             error_msg = str(e).lower()
             error_type = type(e).__name__
 
-            # Check for specific Google API errors
-            if "notfound" in error_type.lower() or "404" in error_msg:
+            # Check for specific Anthropic API errors
+            if "notfounderror" in error_type.lower() or "404" in error_msg:
                 logger.error(
-                    f"Gemini model not found or configuration error: {error_type}: {str(e)}"
+                    f"Claude model not found or configuration error: {error_type}: {str(e)}"
                 )
                 return (
-                    f"AI model configuration error: The requested Gemini model ({DEFAULT_MODEL_NAME}) "
+                    f"AI model configuration error: The requested Claude model ({DEFAULT_MODEL_NAME}) "
                     "was not found or is deprecated. Please verify the configured model name."
                 )
-            elif "resourceexhausted" in error_type.lower():
-                logger.warning("Google API quota exceeded")
-                return "The AI service quota has been exceeded. Please try again later or check your API quota at https://console.cloud.google.com/apis/api/generativelanguage.googleapis.com/quotas"
+            elif "ratelimiterror" in error_type.lower() or "rate limit" in error_msg:
+                logger.warning("Anthropic API rate limit / quota exceeded")
+                return "The AI service quota has been exceeded. Please try again later or check your usage at https://console.anthropic.com/settings/usage"
             elif (
-                "api_key" in error_msg
+                "authenticationerror" in error_type.lower()
+                or "api_key" in error_msg
                 or "authentication" in error_msg
-                or "api key" in error_msg
-                or "unauthenticated" in error_type.lower()
+                or "invalid x-api-key" in error_msg
             ):
-                return "There was an authentication issue with the AI service. Please verify your Google API key is valid."
-            elif "permissiondenied" in error_type.lower() or "permission" in error_msg:
-                if (
-                    "disabled" in error_msg
-                    or "has not been used" in error_msg
-                    or "enable" in error_msg
-                ):
-                    logger.error(
-                        f"Gemini API disabled on Google Cloud project: {str(e)}"
-                    )
-                    return """The Gemini API is not enabled for your Google Cloud project. Please:
-
-1. Visit https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com
-2. Click "Enable" to activate the Generative Language API
-3. Verify your API key has access to the Generative Language API."""
-                return "Permission denied. Please check that your API key has access to the Gemini API."
-            elif "timeout" in error_msg:
+                return "There was an authentication issue with the AI service. Please verify your Anthropic API key is valid."
+            elif "permissiondeniederror" in error_type.lower() or "permission" in error_msg:
+                return "Permission denied. Please check that your API key has access to the requested Claude model."
+            elif "timeout" in error_msg or "apitimeouterror" in error_type.lower():
                 return (
                     "The request timed out. Please try again with a simpler question."
                 )

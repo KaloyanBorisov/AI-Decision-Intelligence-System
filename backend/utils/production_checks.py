@@ -311,7 +311,7 @@ def run_startup_validation():
 
     # Check optional dependencies
     validator.check_optional_dependencies(
-        ["pandas", "sklearn", "mlflow", "langchain", "google.generativeai"]
+        ["pandas", "sklearn", "mlflow", "langchain", "anthropic"]
     )
 
     # Check required directories
@@ -322,7 +322,7 @@ def run_startup_validation():
     # Check optional environment variables (API keys)
     validator.check_environment_variables(
         required_vars=[],  # No strictly required vars for basic operation
-        optional_vars=["GOOGLE_API_KEY", "OPENAI_API_KEY", "DATABASE_URL"],
+        optional_vars=["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DATABASE_URL"],
     )
 
     # Check security settings

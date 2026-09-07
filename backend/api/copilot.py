@@ -72,11 +72,11 @@ async def ask_copilot(request: Request, query: CopilotQuery):
                 ),
             )
 
-        # Check if Google API key is configured
-        if not settings.google_api_key:
-            logger.warning("Google API key not configured, returning fallback response")
+        # Check if Anthropic API key is configured
+        if not settings.anthropic_api_key:
+            logger.warning("Anthropic API key not configured, returning fallback response")
             return CopilotResponse(
-                answer="AI Copilot is not fully configured. Please set the GOOGLE_API_KEY environment variable to enable LLM-powered responses.",
+                answer="AI Copilot is not fully configured. Please set the ANTHROPIC_API_KEY environment variable to enable LLM-powered responses.",
                 sources=["System Configuration"],
                 confidence=0.0,
                 metadata={"error": "missing_api_key"},
@@ -98,9 +98,10 @@ async def ask_copilot(request: Request, query: CopilotQuery):
         try:
             from ..copilot.agent import copilot_agent
 
-            # Query the agent off the event loop thread — the Gemini SDK call
-            # is blocking, and running it inline here would stall the entire
-            # async server (all other requests) for the duration of the call.
+            # Query the agent off the event loop thread — the Anthropic SDK
+            # call is blocking, and running it inline here would stall the
+            # entire async server (all other requests) for the duration of
+            # the call.
             answer = await run_in_threadpool(copilot_agent.query, full_question)
 
             # Extract metadata if available

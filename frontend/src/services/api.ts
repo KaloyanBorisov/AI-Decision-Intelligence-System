@@ -3,7 +3,7 @@ import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // Create axios instance with default config. 90s timeout because some
-// requests (e.g. AI Copilot's Gemini calls) can legitimately take a while.
+// requests (e.g. AI Copilot's Claude calls) can legitimately take a while.
 const api: AxiosInstance = axios.create({
     baseURL: API_BASE_URL,
     timeout: 90000,

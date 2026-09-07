@@ -7,61 +7,66 @@ from unittest.mock import patch, MagicMock
 from backend.copilot.agent import AICopilotAgent, CopilotAgentProxy, get_copilot_agent
 
 
+def _mock_text_block(text: str) -> MagicMock:
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    return block
+
+
 class TestCopilotAgent:
 
     def test_query_without_api_key_returns_configuration_message(self):
         """When API key is not configured, query returns guidance without attempting network calls."""
         with patch("backend.copilot.agent.settings") as mock_settings:
-            mock_settings.google_api_key = ""
+            mock_settings.anthropic_api_key = ""
             agent = AICopilotAgent()
             response = agent.query("How do I train a model?")
-            assert "AI Copilot requires a Google API key to be configured" in response
-            assert "GOOGLE_API_KEY" in response
+            assert "AI Copilot requires an Anthropic API key to be configured" in response
+            assert "ANTHROPIC_API_KEY" in response
 
     def test_query_success_with_mocked_llm(self):
         """When API key is set, query correctly prompts the LLM and extracts the response text."""
         with patch("backend.copilot.agent.settings") as mock_settings, patch(
-            "google.generativeai.configure"
-        ) as mock_configure, patch(
-            "google.generativeai.GenerativeModel"
-        ) as mock_model_cls:
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
 
-            mock_settings.google_api_key = "mock-valid-key"
+            mock_settings.anthropic_api_key = "mock-valid-key"
 
-            # Mock the Gemini GenerativeModel instance and its generate_content response
-            mock_instance = MagicMock()
+            # Mock the Anthropic client instance and its messages.create response
+            mock_client = MagicMock()
             mock_response = MagicMock()
-            mock_response.text = "This is a simulated AI Copilot answer."
-            mock_instance.generate_content.return_value = mock_response
-            mock_model_cls.return_value = mock_instance
+            mock_response.content = [_mock_text_block("This is a simulated AI Copilot answer.")]
+            mock_client.messages.create.return_value = mock_response
+            mock_client_cls.return_value = mock_client
 
             agent = AICopilotAgent()
             result = agent.query("Explain random forest")
 
             assert result == "This is a simulated AI Copilot answer."
-            mock_configure.assert_called_with(api_key="mock-valid-key")
-            mock_model_cls.assert_called_with("gemini-3.6-flash")
-            mock_instance.generate_content.assert_called_once()
+            mock_client_cls.assert_called_with(api_key="mock-valid-key")
+            mock_client.messages.create.assert_called_once()
 
-            call_prompt = mock_instance.generate_content.call_args[0][0]
-            assert "User question: Explain random forest" in call_prompt
+            call_kwargs = mock_client.messages.create.call_args.kwargs
+            assert call_kwargs["model"] == "claude-sonnet-5"
+            assert "User question: Explain random forest" in call_kwargs["messages"][0]["content"]
 
     def test_query_handles_auth_error_gracefully(self):
-        """When the LLM raises an unauthenticated / invalid key error, agent catches it and returns guidance."""
+        """When the LLM raises an authentication / invalid key error, agent catches it and returns guidance."""
         with patch("backend.copilot.agent.settings") as mock_settings, patch(
-            "google.generativeai.configure"
-        ), patch("google.generativeai.GenerativeModel") as mock_model_cls:
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
 
-            mock_settings.google_api_key = "invalid-key"
-            mock_instance = MagicMock()
+            mock_settings.anthropic_api_key = "invalid-key"
+            mock_client = MagicMock()
 
-            class UnauthenticatedError(Exception):
+            class AuthenticationError(Exception):
                 pass
 
-            mock_instance.generate_content.side_effect = UnauthenticatedError(
-                "API key not valid. Please pass a valid API key."
+            mock_client.messages.create.side_effect = AuthenticationError(
+                "invalid x-api-key"
             )
-            mock_model_cls.return_value = mock_instance
+            mock_client_cls.return_value = mock_client
 
             agent = AICopilotAgent()
             result = agent.query("Hello")
@@ -69,21 +74,21 @@ class TestCopilotAgent:
             assert "There was an authentication issue with the AI service" in result
 
     def test_query_handles_quota_error_gracefully(self):
-        """When the LLM raises a quota/resource exhausted error, agent catches it and informs the user."""
+        """When the LLM raises a rate limit / quota error, agent catches it and informs the user."""
         with patch("backend.copilot.agent.settings") as mock_settings, patch(
-            "google.generativeai.configure"
-        ), patch("google.generativeai.GenerativeModel") as mock_model_cls:
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
 
-            mock_settings.google_api_key = "test-key"
-            mock_instance = MagicMock()
+            mock_settings.anthropic_api_key = "test-key"
+            mock_client = MagicMock()
 
-            class ResourceExhausted(Exception):
+            class RateLimitError(Exception):
                 pass
 
-            mock_instance.generate_content.side_effect = ResourceExhausted(
-                "ResourceExhausted: Quota exceeded"
+            mock_client.messages.create.side_effect = RateLimitError(
+                "rate limit exceeded"
             )
-            mock_model_cls.return_value = mock_instance
+            mock_client_cls.return_value = mock_client
 
             agent = AICopilotAgent()
             result = agent.query("Hello")
@@ -93,54 +98,52 @@ class TestCopilotAgent:
     def test_query_handles_model_not_found_gracefully(self):
         """When the model is not found, agent returns model configuration error."""
         with patch("backend.copilot.agent.settings") as mock_settings, patch(
-            "google.generativeai.configure"
-        ), patch("google.generativeai.GenerativeModel") as mock_model_cls:
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
 
-            mock_settings.google_api_key = "test-key"
-            mock_instance = MagicMock()
+            mock_settings.anthropic_api_key = "test-key"
+            mock_client = MagicMock()
 
             class NotFoundError(Exception):
                 pass
 
-            mock_instance.generate_content.side_effect = NotFoundError(
-                "404 models/gemini-pro is not found for API version v1beta"
+            mock_client.messages.create.side_effect = NotFoundError(
+                "404 model: claude-sonnet-5 not found"
             )
-            mock_model_cls.return_value = mock_instance
+            mock_client_cls.return_value = mock_client
 
             agent = AICopilotAgent()
             result = agent.query("Hello")
 
             assert "AI model configuration error" in result
-            assert "gemini-3.6-flash" in result
+            assert "claude-sonnet-5" in result
 
-    def test_query_handles_api_disabled_gracefully(self):
-        """When the Gemini API is not enabled in Google Cloud project, agent returns enabling guidance."""
+    def test_query_handles_permission_denied_gracefully(self):
+        """When the API key lacks access to the model, agent returns permission guidance."""
         with patch("backend.copilot.agent.settings") as mock_settings, patch(
-            "google.generativeai.configure"
-        ), patch("google.generativeai.GenerativeModel") as mock_model_cls:
+            "anthropic.Anthropic"
+        ) as mock_client_cls:
 
-            mock_settings.google_api_key = "test-key"
-            mock_instance = MagicMock()
+            mock_settings.anthropic_api_key = "test-key"
+            mock_client = MagicMock()
 
-            class PermissionDenied(Exception):
+            class PermissionDeniedError(Exception):
                 pass
 
-            mock_instance.generate_content.side_effect = PermissionDenied(
-                "Generative Language API has not been used in project 12345 before or it is disabled. Enable it by visiting..."
+            mock_client.messages.create.side_effect = PermissionDeniedError(
+                "permission denied for this model"
             )
-            mock_model_cls.return_value = mock_instance
+            mock_client_cls.return_value = mock_client
 
             agent = AICopilotAgent()
             result = agent.query("Hello")
 
-            assert (
-                "The Gemini API is not enabled for your Google Cloud project" in result
-            )
+            assert "Permission denied" in result
 
     def test_copilot_proxy_and_singleton(self):
         """Verify proxy forwards queries correctly."""
         proxy = CopilotAgentProxy()
         with patch("backend.copilot.agent.settings") as mock_settings:
-            mock_settings.google_api_key = ""
+            mock_settings.anthropic_api_key = ""
             res = proxy.query("Test question")
-            assert "AI Copilot requires a Google API key to be configured" in res
+            assert "AI Copilot requires an Anthropic API key to be configured" in res

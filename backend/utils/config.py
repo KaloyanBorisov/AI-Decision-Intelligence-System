@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Google Gemini
     google_api_key: str = ""
 
+    # Anthropic Claude
+    anthropic_api_key: str = ""
+
     # Celery and Redis
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/0"
