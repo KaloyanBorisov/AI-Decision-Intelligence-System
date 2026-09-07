@@ -53,12 +53,28 @@ services:
     command: mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root /mlflow --host 0.0.0.0 --port 5000 --allowed-hosts "*"
     volumes:
       - mlflow_data:/mlflow
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+
+  jupyter:
+    image: ai-decision-jupyter:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - PYTHONPATH=/app:/app/backend:.
+      - BACKEND_URL=http://backend:8000
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./models:/app/models
+      - uploads:/app/uploads
+      - storage_data:/app/storage
+      - models_data:/app/backend/models
+    depends_on:
+      backend:
+        condition: service_healthy
 
 volumes:
   redis_data:

@@ -42,11 +42,12 @@ secrets.json
 *.crt
 *.cer
 
-# IDE
+# IDE & Notebooks
 .vscode/
 .idea/
 *.swp
 *.swo
+.ipynb_checkpoints/
 
 # OS
 .DS_Store
@@ -60,7 +61,8 @@ mlflow.db
 *.sqlite3
 
 # Artifacts
-models/
+models/*
+!models/.gitkeep
 *.pt
 *.joblib
 
