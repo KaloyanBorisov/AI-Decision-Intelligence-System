@@ -197,6 +197,11 @@
 }
 
 .messageText {
+    /* Global `p { color }` in globals.css targets this element directly and
+       otherwise wins over the bubble's intended text color (white on the
+       user bubble), since inheritance only applies when nothing declares
+       color on the element itself. */
+    color: inherit;
     font-size: var(--text-sm);
     line-height: var(--leading-relaxed);
     margin: 0;
