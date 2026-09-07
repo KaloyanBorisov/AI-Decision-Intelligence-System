@@ -5,7 +5,6 @@ import { ToastProvider } from './context/ToastProvider';
 import { AuthProvider } from './context/AuthContext';
 import Layout from './components/Layout/Layout';
 import Toast from './components/ui/Toast';
-import ServerWarmingBanner from './components/ui/ServerWarmingBanner';
 import Spinner from './components/ui/Spinner';
 import ErrorBoundary from './components/ErrorBoundary';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -94,7 +93,6 @@ function App() {
                 </Routes>
               </Suspense>
               <Toast />
-              <ServerWarmingBanner />
             </Router>
           </AuthProvider>
         </ToastProvider>
