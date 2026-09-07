@@ -37,20 +37,28 @@ class VisualizationService:
         numeric_df = df.select_dtypes(include=[float, int])
         if numeric_df.empty:
             return None
-        heatmap = CorrelationHeatmap(numeric_df)
-        return heatmap.generate_plot()
+        corr = numeric_df.corr()
+        return {
+            "matrix": corr.round(4).values.tolist(),
+            "columns": corr.columns.tolist(),
+        }
 
     def get_feature_importance(self, model_id: str) -> Optional[Dict[str, Any]]:
         from .model_service import model_service
 
-        model = model_service.models.get(model_id)
-        if not model:
+        info = model_service.models.get(model_id)
+        if not info:
             return None
-        # Need feature names, assume from dataset, but for simplicity, mock
-        # In real, store feature names with model
-        feature_names = [f"feature_{i}" for i in range(10)]  # mock
+        model = info.get("model")
+        if model is None:
+            return None
+        feature_names = info.get("feature_names") or []
+        n_features = getattr(model, "n_features_in_", len(feature_names))
+        if not feature_names:
+            feature_names = [f"feature_{i}" for i in range(n_features)]
         plot = FeatureImportancePlot(model, feature_names)
-        return plot.generate_plot()
+        importance = plot._get_importance()
+        return {"feature_importance": importance.to_dict()}
 
     def get_trend_analysis(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         """Build a trend chart for a dataset.
@@ -88,8 +96,22 @@ class VisualizationService:
                     f"Dataset {dataset_id} has no date column and/or no numeric "
                     f"target (date_col={date_col!r}, target={target!r})"
                 )
-            chart = TrendAnalysisChart(df, date_col, target)
-            return chart.generate_plot()
+            df_sorted = df[[date_col, target]].dropna().sort_values(date_col)
+            # Downsample very large series so the chart stays responsive
+            max_points = 2000
+            if len(df_sorted) > max_points:
+                step = len(df_sorted) // max_points
+                df_sorted = df_sorted.iloc[::step]
+            x_values = df_sorted[date_col].astype(str)
+            return {
+                "trends": [
+                    {
+                        "name": target,
+                        "x": x_values.tolist(),
+                        "y": df_sorted[target].tolist(),
+                    }
+                ]
+            }
         except (DatasetNotFoundError, NotTimeSeriesError):
             raise
         except Exception:
