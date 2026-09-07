@@ -11,26 +11,26 @@ router = APIRouter()
 
 @router.get("/correlation/{dataset_id}")
 async def get_correlation_heatmap(dataset_id: str):
-    plot = visualization_service.get_correlation_heatmap(dataset_id)
-    if not plot:
+    result = visualization_service.get_correlation_heatmap(dataset_id)
+    if not result:
         raise HTTPException(
             status_code=404, detail="Dataset not found or no numeric data"
         )
-    return {"plot": plot}
+    return result
 
 
 @router.get("/feature_importance/{model_id}")
 async def get_feature_importance_plot(model_id: str):
-    plot = visualization_service.get_feature_importance(model_id)
-    if not plot:
+    result = visualization_service.get_feature_importance(model_id)
+    if not result:
         raise HTTPException(status_code=404, detail="Model not found")
-    return {"plot": plot}
+    return result
 
 
 @router.get("/trend/{dataset_id}")
 async def get_trend_analysis_chart(dataset_id: str):
     try:
-        plot = visualization_service.get_trend_analysis(dataset_id)
+        result = visualization_service.get_trend_analysis(dataset_id)
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail="Dataset not found")
     except NotTimeSeriesError:
@@ -38,7 +38,7 @@ async def get_trend_analysis_chart(dataset_id: str):
             status_code=422,
             detail="Dataset has no date column or usable numeric target for a trend chart",
         )
-    return {"plot": plot}
+    return result
 
 
 @router.get("/forecast/{model_id}/{dataset_id}")
