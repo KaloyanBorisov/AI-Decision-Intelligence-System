@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, status, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from ..utils.validators import sanitize_input
@@ -97,8 +98,10 @@ async def ask_copilot(request: Request, query: CopilotQuery):
         try:
             from ..copilot.agent import copilot_agent
 
-            # Query the agent
-            answer = copilot_agent.query(full_question)
+            # Query the agent off the event loop thread — the Gemini SDK call
+            # is blocking, and running it inline here would stall the entire
+            # async server (all other requests) for the duration of the call.
+            answer = await run_in_threadpool(copilot_agent.query, full_question)
 
             # Extract metadata if available
             sources = ["AI Copilot", "System Data"]
