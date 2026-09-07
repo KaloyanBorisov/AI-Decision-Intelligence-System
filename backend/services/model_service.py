@@ -340,6 +340,13 @@ class ModelService:
         # Convert to DataFrame
         df = pd.DataFrame([data])
 
+        feature_names = model_info.get("feature_names", [])
+        if feature_names:
+            for f in feature_names:
+                if f not in df.columns:
+                    df[f] = 0.0
+            df = df[feature_names]
+
         if automl is not None:
             prediction = automl.predict(df)[0]
             try:
@@ -351,8 +358,6 @@ class ModelService:
                 probabilities = None
         else:
             model = model_info["model"]
-            cols = [c for c in model_info["feature_names"] if c in df.columns]
-            df = df[cols] if cols else df
             prediction = model.predict(df)[0]
             confidence = None
             probabilities = None
@@ -377,12 +382,17 @@ class ModelService:
 
         model_info = self.models[model_id]
         model = model_info["model"]
+        feature_names = model_info.get("feature_names", [])
 
         # Convert to DataFrame
         df = pd.DataFrame(data_list)
 
-        # Ensure feature order
-        df = df[model_info["feature_names"]]
+        # Ensure feature order and missing columns
+        if feature_names:
+            for f in feature_names:
+                if f not in df.columns:
+                    df[f] = 0.0
+            df = df[feature_names]
 
         # Make predictions
         predictions = model.predict(df)
@@ -431,8 +441,22 @@ class ModelService:
             raise ValueError(f"Model {model_id} not found")
 
         model_info = self.models[model_id]
-        explainer = model_info["explainer"]
-        X_sample = model_info["X_sample"]
+        explainer = model_info.get("explainer")
+        X_sample = model_info.get("X_sample")
+
+        if explainer is None or X_sample is None:
+            # Fallback to feature_importances_ if available on tree models
+            model = model_info.get("model")
+            feature_names = model_info.get("feature_names", [])
+            if model is not None and hasattr(model, "feature_importances_"):
+                importances = list(model.feature_importances_)
+                feat_pairs = sorted(zip(feature_names, importances), key=lambda x: abs(x[1]), reverse=True)[:top_n]
+                return {
+                    "features": [p[0] for p in feat_pairs],
+                    "importance_values": [float(p[1]) for p in feat_pairs],
+                    "method": "tree_feature_importance",
+                }
+            raise ValueError(f"SHAP explainer not initialized for model {model_id}")
 
         # Get global importance
         importance = explainer.get_global_importance(X_sample, top_n=top_n)
@@ -447,11 +471,18 @@ class ModelService:
             raise ValueError(f"Model {model_id} not found")
 
         model_info = self.models[model_id]
-        explainer = model_info["explainer"]
+        explainer = model_info.get("explainer")
+        if explainer is None:
+            raise ValueError(f"SHAP explainer not available for model {model_id}")
 
-        # Convert to DataFrame
+        # Convert to DataFrame and align features
         df = pd.DataFrame([instance])
-        df = df[model_info["feature_names"]]
+        feature_names = model_info.get("feature_names", [])
+        if feature_names:
+            for f in feature_names:
+                if f not in df.columns:
+                    df[f] = 0.0
+            df = df[feature_names]
 
         # Get explanation
         explanation = explainer.explain_instance(df)
