@@ -19,8 +19,24 @@ const SUGGESTED_PROMPTS = [
     'How many missing values?',
 ];
 
+const STORAGE_KEY = 'decisera_copilot_chat_history';
+
+const loadStoredMessages = (): Message[] => {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw) as Array<Omit<Message, 'timestamp'> & { timestamp: string }>;
+        return parsed.map(m => ({ ...m, timestamp: new Date(m.timestamp) }));
+    } catch {
+        return [];
+    }
+};
+
 const ChatInterface: React.FC = () => {
-    const [messages, setMessages] = useState<Message[]>([]);
+    // Restoring from storage so the conversation survives navigating away
+    // and back (React Router unmounts this component on route change) and
+    // page reloads, not just re-renders within the same mount.
+    const [messages, setMessages] = useState<Message[]>(loadStoredMessages);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -33,6 +49,12 @@ const ChatInterface: React.FC = () => {
 
     useEffect(() => {
         scrollToBottom();
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+        } catch {
+            // Storage full or unavailable (private browsing, etc.) — chat
+            // still works for the current mount, it just won't persist.
+        }
     }, [messages]);
 
     const sendMessage = async (text: string) => {
@@ -120,6 +142,15 @@ const ChatInterface: React.FC = () => {
                     <h2 className={styles.chatTitle}>AI Copilot</h2>
                     <p className={styles.chatSubtitle}>Ask questions about your data in plain English</p>
                 </div>
+                {messages.length > 0 && (
+                    <button
+                        className={styles.clearBtn}
+                        onClick={() => setMessages([])}
+                        aria-label="Clear chat history"
+                    >
+                        Clear chat
+                    </button>
+                )}
             </div>
 
             {/* Messages */}
