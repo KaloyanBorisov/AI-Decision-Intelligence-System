@@ -60,40 +60,66 @@ TreeSHAP and KernelSHAP visualizer uncovering global feature importance rankings
 
 ## 🏗️ Architecture Overview
 
-Decisera is built with a decoupled, cloud-native client-server architecture:
+Decisera follows a **Microservices-based MLOps & Decision Intelligence Architecture** designed for high throughput, asynchronous model training, decoupled storage, and explainability.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│             Frontend: React 18 + TypeScript (Vercel)        │
-│  - Precision Foundry Design System (WCAG AA compliant)     │
-│  - Plotly.js Interactive Analytics & SHAP Visualizations    │
-│  - Asynchronous Axios client with cold-start health probe   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ HTTPS / JSON REST
-                               ▼
+│                    User Interface Layer                     │
+│   Frontend (React 18 + TS)        │   JupyterLab Sandbox    │
+│   (Precision Foundry Design)      │   (Interactive Inferences)│
+└──────────────┬───────────────────────────────┬──────────────┘
+               │ HTTPS / REST                  │ Direct / REST Inferences
+               ▼                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               Backend: FastAPI + Python 3.11 (Render)       │
+│               Backend: FastAPI (Orchestrator)               │
 │  - Pydantic v2 schemas & strict type validation             │
 │  - JWT Bearer Authentication & PBKDF2 / Bcrypt hashing      │
-│  - Background task scheduling & Redis caching layers        │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-            ┌──────────────────┴──────────────────┐
-            ▼                                     ▼
-┌───────────────────────────────┐   ┌───────────────────────────────┐
-│     AutoML & Analytics Engine │   │   AI Copilot & Monitoring     │
-│  - Scikit-learn, XGBoost      │   │  - Anthropic Claude            │
-│  - LightGBM, CatBoost         │   │  - MLflow Experiment Lineage  │
-│  - Prophet, PyTorch LSTM      │   │  - Prometheus /metrics        │
-│  - Optuna Hyperparameter Tuner│   │  - Grafana Pre-built Panels   │
-│  - TreeSHAP & KernelSHAP      │   │  - Redis In-Memory Cache      │
-└───────────────────────────────┘   └───────────────────────────────┘
+│  - Presentation / API Routing Layer (`backend/api/`)         │
+│  - Service & Business Logic Layer (`backend/services/`)     │
+└──────────────┬───────────────────────────────┬──────────────┘
+               │ Queues Tasks                  │ Tracks Models & Runs
+               ▼                               ▼
+┌────────────────────────────┐    ┌───────────────────────────┐
+│     MLOps Worker Layer     │    │      Model Registry       │
+│  Celery Workers + Redis    │    │       MLflow Server       │
+│  - Async AutoML & Tuning   │    │  - Experiment Lineage     │
+│  - Batch Inferences        │    │  - Model Artifact Store   │
+└──────────────┬─────────────┘    └────────────┬──────────────┘
+               │                               │
+               └───────────────┬───────────────┘
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│             Persistence & Shared Volume Layer               │
+│  • models_data: Serialized .joblib estimators & pipelines   │
+│  • storage_data: SQLite (decisera.db) / PostgreSQL metadata │
+│  • uploads & mlflow_data: Datasets & Experiment artifacts   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-The system operates across three decoupled layers:
-1. **Frontend (React 18 + TypeScript):** Hosted on Vercel Edge. Employs the bespoke *Precision Foundry* tokenized design system (Obsidian dark palette, Lucide icons, responsive sidebar rail) and communicates via an authenticated REST API client.
-2. **Backend (FastAPI + Python 3.11):** Hosted on Render. Provides asynchronous REST endpoints with Pydantic v2 validation, JWT authentication, and automated task execution.
-3. **ML Pipeline & MLOps:** Coordinates 12+ ML models (XGBoost, LightGBM, CatBoost, RandomForest, Prophet, PyTorch LSTM) with Optuna hyperparameter optimization, SHAP explainability, Redis caching, MLflow tracking, and Prometheus metrics.
+### Architectural Pillars
+
+1. **High-Level Paradigm — Containerized Microservices / SOA:**
+   - **Frontend SPA (React 18 + TypeScript):** Hosted on Vercel Edge. Employs the bespoke *Precision Foundry* tokenized design system (Obsidian dark palette, Lucide icons, responsive sidebar rail).
+   - **Backend API (FastAPI + Python 3.11):** High-performance async gateway handling data ingestion, model management, predictions, and health/monitoring.
+   - **Interactive Exploration (JupyterLab):** Dedicated data science container with direct access to dataset directories, models, and live REST endpoints for custom scenario simulations.
+
+2. **Backend Design — Layered (N-Tier) Architecture:**
+   - **Presentation / API Layer (`backend/api/`):** FastAPI routers validating requests, handling auth, and serializing responses.
+   - **Service / Business Logic Layer (`backend/services/`):** Orchestrates domain workflows (`model_service.py`, `dataset_service.py`, `insights_service.py`).
+   - **Domain / ML Pipeline Layer (`backend/ml/`):** Data profiling, automated cleaning, AutoML model training, Optuna hyperparameter optimization, and TreeSHAP/KernelSHAP explainability.
+   - **Data Access & Storage Layer (`backend/utils/storage.py`):** SQLAlchemy ORM managing SQLite/PostgreSQL persistence.
+
+3. **Execution Pattern — Asynchronous Task-Worker Architecture:**
+   - Compute-intensive operations (AutoML training, hyperparameter search, large batch scoring) are offloaded to **Celery** workers backed by a **Redis** message broker.
+   - Endpoints immediately return `202 Accepted` with a `task_id`, allowing non-blocking progress polling and maintaining low latency for real-time traffic.
+
+4. **MLOps Pattern — Decoupled Model Storage & Lifecycle Management:**
+   - **Binary Storage (`models_data`):** Serialized `.joblib` pipelines, estimators, and SHAP background samples are stored on persistent disk volumes (`/app/models`).
+   - **Metadata Registry (`storage_data`):** Model scores, task types, target columns, and feature schemas are saved in SQL storage.
+   - **Experiment Lineage (MLflow):** Metrics, parameters, and artifact versions are tracked at `http://localhost:5000`.
+
+5. **AI Pattern — ReAct / Tool-Augmented AI Copilot (RAG):**
+   - The AI Copilot (`backend/copilot/`) functions as an autonomous tool-calling agent. It inspects datasets, runs statistical tools, retrieves domain context via RAG, and generates plain-language business recommendations.
 
 ---
 
