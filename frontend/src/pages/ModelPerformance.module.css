@@ -73,6 +73,12 @@
     margin-top: 2px;
 }
 
+.modelDataset {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
 .taskBadge {
     font-size: 10px;
     font-weight: var(--font-semibold);

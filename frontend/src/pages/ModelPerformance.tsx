@@ -106,6 +106,13 @@ const ModelPerformance: React.FC = () => {
         return String(val || '—');
     };
 
+    const getDatasetName = (datasetId?: string): string => {
+        if (!datasetId) return 'Unknown dataset';
+        if (datasetId === 'custom_upload') return 'Custom upload';
+        const ds = Array.isArray(datasets) ? datasets.find((d) => d.id === datasetId) : undefined;
+        return ds?.name || `Unknown dataset (${datasetId.slice(0, 8)})`;
+    };
+
     return (
         <div className={styles.container}>
             <div className={styles.pageHeader}>
@@ -166,6 +173,7 @@ const ModelPerformance: React.FC = () => {
                                 <div className={styles.modelInfo}>
                                     <div className={styles.modelType}>{model.model_type || 'AutoML'}</div>
                                     <div className={styles.modelTarget}>Target: {model.target_column}</div>
+                                    <div className={styles.modelDataset}>Dataset: {getDatasetName(model.dataset_id)}</div>
                                 </div>
                                 <span className={styles.taskBadge}>{model.task_type}</span>
                             </div>
