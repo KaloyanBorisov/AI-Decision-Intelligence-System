@@ -77,3 +77,7 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# Data & CSV files
+data/
+*.csv

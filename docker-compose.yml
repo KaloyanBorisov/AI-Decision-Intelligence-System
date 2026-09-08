@@ -69,6 +69,7 @@ services:
     volumes:
       - ./notebooks:/app/notebooks
       - ./models:/app/models
+      - ./data:/app/data
       - uploads:/app/uploads
       - storage_data:/app/storage
       - models_data:/app/backend/models
