@@ -14,6 +14,7 @@ const LandingPage = React.lazy(() => import('./pages/LandingPage'));
 const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const DatasetOverview = React.lazy(() => import('./pages/DatasetOverview'));
 const ModelPerformance = React.lazy(() => import('./pages/ModelPerformance'));
+const Predict = React.lazy(() => import('./pages/Predict'));
 const FeatureImportance = React.lazy(() => import('./pages/FeatureImportance'));
 const VisualInsights = React.lazy(() => import('./pages/VisualInsights'));
 const CopilotChat = React.lazy(() => import('./pages/CopilotChat'));
@@ -66,6 +67,13 @@ function App() {
                     <ProtectedRoute>
                       <Layout>
                         <ModelPerformance />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/predict" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <Predict />
                       </Layout>
                     </ProtectedRoute>
                   } />

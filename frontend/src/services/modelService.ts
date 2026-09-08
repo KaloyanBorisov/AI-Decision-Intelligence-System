@@ -6,6 +6,8 @@ export interface ModelSummary {
     dataset_id: string;
     target_column: string;
     task_type: string;
+    features?: number;
+    feature_names?: string[];
     metrics?: Record<string, number>;
     created_at?: string;
 }
@@ -14,6 +16,13 @@ export interface TrainModelRequest {
     dataset_id: string;
     target_column: string;
     task_type?: string;
+}
+
+export interface PredictionResult {
+    prediction: number | string;
+    confidence: number | null;
+    probabilities: number[] | null;
+    model: string;
 }
 
 export const getModels = async (): Promise<ModelSummary[]> => {
@@ -49,6 +58,17 @@ export const getTaskStatus = async (taskId: string): Promise<any> => {
 
 export const deleteModel = async (modelId: string): Promise<void> => {
     await api.delete(`/api/v1/models/${modelId}`);
+};
+
+export const predict = async (
+    modelId: string,
+    data: Record<string, any>
+): Promise<PredictionResult> => {
+    const response = await api.post('/api/v1/models/predict', {
+        model_id: modelId,
+        data,
+    });
+    return response.data.predictions[0];
 };
 
 // Legacy alias

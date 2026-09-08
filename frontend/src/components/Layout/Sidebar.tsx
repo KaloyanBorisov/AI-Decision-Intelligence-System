@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import {
     LayoutDashboard, Database, Cpu, BarChart3,
     LineChart, MessageSquare, PanelLeftClose,
-    PanelLeft, LogOut, Sparkles
+    PanelLeft, LogOut, Sparkles, Zap
 } from 'lucide-react';
 import styles from './Sidebar.module.css';
 
@@ -31,6 +31,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
 
     const analyticsNavItems: NavItem[] = [
         { path: '/model-performance', icon: <Cpu size={18} />, label: 'Models' },
+        { path: '/predict', icon: <Zap size={18} />, label: 'Predict' },
         { path: '/feature-importance', icon: <BarChart3 size={18} />, label: 'Feature Importance' },
         { path: '/visual-insights', icon: <LineChart size={18} />, label: 'Visual Insights' },
     ];

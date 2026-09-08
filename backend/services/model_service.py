@@ -528,6 +528,7 @@ class ModelService:
                     "task_type": task_type,
                     "best_score": best_score,
                     "features": len(info.get("feature_names", [])),
+                    "feature_names": info.get("feature_names", []),
                     "metrics": {
                         (
                             "accuracy" if task_type == "classification" else "r2_score"
