@@ -71,5 +71,16 @@ export const predict = async (
     return response.data.predictions[0];
 };
 
+export const predictBatch = async (
+    modelId: string,
+    data: Record<string, any>[]
+): Promise<PredictionResult[]> => {
+    const response = await api.post('/api/v1/models/predict/batch', {
+        model_id: modelId,
+        data,
+    });
+    return response.data.predictions;
+};
+
 // Legacy alias
 export const getModelPerformance = getModels;

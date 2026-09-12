@@ -21,6 +21,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
@@ -591,6 +593,9 @@ class ModelMetadataModel(Base):
     automl_path = Column(String(1024), nullable=True)
     model_path = Column(String(1024), nullable=True)
     xsample_path = Column(String(1024), nullable=True)
+    # Which MLflow experiment this model was trained under, so inference
+    # traces can be routed back to it (see ModelService._use_experiment_for_tracing).
+    mlflow_experiment_name = Column(String(255), nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         def load_json(val, default):
@@ -614,6 +619,7 @@ class ModelMetadataModel(Base):
             "automl_path": self.automl_path or "",
             "model_path": self.model_path or "",
             "xsample_path": self.xsample_path or "",
+            "mlflow_experiment_name": self.mlflow_experiment_name or "",
         }
 
     @classmethod
@@ -641,6 +647,7 @@ class ModelMetadataModel(Base):
             automl_path=str(data.get("automl_path") or ""),
             model_path=str(data.get("model_path") or ""),
             xsample_path=str(data.get("xsample_path") or ""),
+            mlflow_experiment_name=str(data.get("mlflow_experiment_name") or ""),
         )
 
 
@@ -650,7 +657,27 @@ class SQLModelStorage:
     def __init__(self, engine=None):
         self.engine = engine or _get_engine()
         Base.metadata.create_all(bind=self.engine)
+        self._migrate_columns()
         self.SessionFactory = scoped_session(sessionmaker(bind=self.engine))
+
+    def _migrate_columns(self) -> None:
+        """Lightweight migration: create_all only creates missing tables, not
+        columns added to a model after the table already existed on disk.
+        Add those columns in place (SQLite and Postgres both support a bare
+        ALTER TABLE ... ADD COLUMN)."""
+        try:
+            inspector = inspect(self.engine)
+            if "models" not in inspector.get_table_names():
+                return
+            existing_cols = {c["name"] for c in inspector.get_columns("models")}
+            if "mlflow_experiment_name" not in existing_cols:
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        text("ALTER TABLE models ADD COLUMN mlflow_experiment_name VARCHAR(255)")
+                    )
+                logger.info("Migrated models table: added mlflow_experiment_name column")
+        except Exception as exc:
+            logger.warning(f"Could not migrate models table: {exc}")
 
     def _get_session(self):
         return self.SessionFactory()
@@ -673,6 +700,7 @@ class SQLModelStorage:
                 existing.automl_path = new_obj.automl_path
                 existing.model_path = new_obj.model_path
                 existing.xsample_path = new_obj.xsample_path
+                existing.mlflow_experiment_name = new_obj.mlflow_experiment_name
             else:
                 session.add(new_obj)
             session.commit()

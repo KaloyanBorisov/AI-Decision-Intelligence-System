@@ -201,6 +201,73 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* ========== WHAT-IF SWEEP ========== */
+.sweepCard {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+}
+
+.sweepHeader {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    color: var(--accent-primary);
+}
+
+.sweepControls {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr auto;
+    gap: var(--space-3);
+    align-items: end;
+}
+
+@media (max-width: 760px) {
+    .sweepControls {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+.sweepChartWrap {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.sweepSvg {
+    width: 100%;
+    height: auto;
+    max-height: 260px;
+}
+
+.sweepAxis {
+    stroke: var(--border-subtle);
+    stroke-width: 1;
+}
+
+.sweepAxisLabel {
+    font-size: 9px;
+    fill: var(--text-muted);
+}
+
+.sweepLine {
+    fill: none;
+    stroke: var(--accent-primary);
+    stroke-width: 2;
+}
+
+.sweepDot {
+    fill: var(--accent-primary);
+}
+
+.sweepCaption {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-align: center;
+}
+
 /* ========== EMPTY STATE ========== */
 .emptyCard { padding: var(--space-10) !important; }
 

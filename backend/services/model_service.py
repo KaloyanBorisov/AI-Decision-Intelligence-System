@@ -10,12 +10,22 @@ from typing import Dict, Any, List, Optional
 import logging
 from pathlib import Path
 import joblib
+import mlflow
 
 from ..utils.cache import cache_get, cache_set, cache_delete
 from ..utils.storage import models_storage
 from ..services.dataset_service import dataset_service
+from ..utils.config import settings
 
 logger = logging.getLogger(__name__)
+
+# MLflow Tracing: this is the module that actually serves /predict and
+# /predict/batch for the frontend. Point at the same tracking server used
+# for training runs; never let this block inference.
+try:
+    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+except Exception as exc:
+    logger.warning("Could not configure MLflow tracking URI for tracing: %s", exc)
 
 
 class ModelRegistry:
@@ -68,6 +78,9 @@ class ModelRegistry:
                 "automl_path": automl_path,
                 "model_path": model_path,
                 "xsample_path": xsample_path,
+                # Which MLflow experiment this model was trained under, so
+                # inference traces can be routed back to it later.
+                "mlflow_experiment_name": info.get("mlflow_experiment_name", ""),
             },
         )
         self._cache[model_id] = info
@@ -122,6 +135,7 @@ class ModelRegistry:
             "best_score": data.get("best_score", 0.0),
             "all_results": data.get("all_results", {}),
             "created_at": data.get("created_at", ""),
+            "mlflow_experiment_name": data.get("mlflow_experiment_name", ""),
         }
         self._cache[model_id] = entry
         return entry
@@ -172,6 +186,20 @@ class ModelService:
         self.model_dir.mkdir(exist_ok=True)
         self.models = ModelRegistry(self.model_dir)
         self.tasks = {}  # Task status tracking
+        self._traced_experiment: Optional[str] = None  # avoids redundant set_experiment calls
+
+    def _use_experiment_for_tracing(self, model_info: Dict[str, Any]) -> None:
+        """Point MLflow at the experiment the model was trained under (falling back
+        to the configured default) before a traced predict call runs, so inference
+        traces land next to that model's training runs in the MLflow UI."""
+        experiment_name = model_info.get("mlflow_experiment_name") or settings.mlflow_experiment_name
+        if experiment_name == self._traced_experiment:
+            return
+        try:
+            mlflow.set_experiment(experiment_name)
+            self._traced_experiment = experiment_name
+        except Exception as exc:
+            logger.debug("Could not switch MLflow experiment for tracing: %s", exc)
 
     def get_dataset(self, dataset_id: str) -> pd.DataFrame:
         """Load dataset from service"""
@@ -286,6 +314,7 @@ class ModelService:
                 "best_score": best_score,
                 "all_results": results["all_results"],
                 "created_at": datetime.utcnow().isoformat(),
+                "mlflow_experiment_name": experiment_name,
             }
 
             # Update task status
@@ -335,6 +364,13 @@ class ModelService:
             raise ValueError(f"Model {model_id} not found")
 
         model_info = self.models[model_id]
+        self._use_experiment_for_tracing(model_info)
+        return self._predict_traced(model_id, model_info, data)
+
+    @mlflow.trace(name="ModelService.predict", span_type="MODEL")
+    def _predict_traced(
+        self, model_id: str, model_info: Dict[str, Any], data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         automl = model_info.get("automl")
 
         # Convert to DataFrame
@@ -362,7 +398,7 @@ class ModelService:
             confidence = None
             probabilities = None
 
-        return {
+        result = {
             "prediction": (
                 float(prediction)
                 if isinstance(prediction, (np.integer, np.floating))
@@ -373,6 +409,17 @@ class ModelService:
             "model": model_info["best_model_name"],
         }
 
+        try:
+            mlflow.update_current_trace(tags={
+                "model_id": model_id,
+                "model.type": model_info["best_model_name"],
+                "model.task_type": model_info.get("task_type", ""),
+            })
+        except Exception as exc:
+            logger.debug("Could not tag MLflow trace: %s", exc)
+
+        return result
+
     def predict_batch(
         self, model_id: str, data_list: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -381,6 +428,13 @@ class ModelService:
             raise ValueError(f"Model {model_id} not found")
 
         model_info = self.models[model_id]
+        self._use_experiment_for_tracing(model_info)
+        return self._predict_batch_traced(model_id, model_info, data_list)
+
+    @mlflow.trace(name="ModelService.predict_batch", span_type="MODEL")
+    def _predict_batch_traced(
+        self, model_id: str, model_info: Dict[str, Any], data_list: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         model = model_info["model"]
         feature_names = model_info.get("feature_names", [])
 
@@ -432,6 +486,16 @@ class ModelService:
                     "model": model_info["best_model_name"],
                 }
             )
+
+        try:
+            mlflow.update_current_trace(tags={
+                "model_id": model_id,
+                "model.type": model_info["best_model_name"],
+                "model.task_type": model_info.get("task_type", ""),
+                "num_records": str(len(results)),
+            })
+        except Exception as exc:
+            logger.debug("Could not tag MLflow trace: %s", exc)
 
         return results
 

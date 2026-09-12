@@ -6,7 +6,6 @@ import pytest
 import pandas as pd
 import numpy as np
 from backend.ml.automl import AutoML
-from backend.ml.inference import ModelInference
 from backend.ml.explainability import ModelExplainer
 from backend.ml.data_preprocessing import DataCleaner, FeatureEngineer
 
