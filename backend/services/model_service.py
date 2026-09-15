@@ -234,6 +234,10 @@ class ModelService:
         task_type: str = "auto",
         test_size: float = 0.2,
         experiment_name: str = "AutoML",
+        use_h2o: bool = True,
+        h2o_max_runtime_secs: int = 180,
+        use_flaml: bool = False,
+        flaml_time_budget_secs: int = 180,
     ):
         """
         Train model asynchronously (to be called as background task)
@@ -259,7 +263,14 @@ class ModelService:
             from ..ml.explainability import ModelExplainer
 
             # Initialize AutoML
-            automl = AutoML(task_type=task_type, test_size=test_size)
+            automl = AutoML(
+                task_type=task_type,
+                test_size=test_size,
+                use_h2o=use_h2o,
+                h2o_max_runtime_secs=h2o_max_runtime_secs,
+                use_flaml=use_flaml,
+                flaml_time_budget_secs=flaml_time_budget_secs,
+            )
 
             # Update progress
             self.tasks[task_id]["progress"] = 20
@@ -290,6 +301,11 @@ class ModelService:
             except Exception as explainer_err:
                 logger.warning(f"Could not initialize SHAP explainer: {explainer_err}")
                 explainer = None
+            # SHAP doesn't understand H2O models; fall back to the variable importance
+            # H2O itself computed during training.
+            variable_importance = results.get("variable_importance") or getattr(
+                automl, "variable_importance", None
+            )
 
             # Save model
             model_id = task_id
@@ -305,11 +321,13 @@ class ModelService:
                 "automl": automl,
                 "model": automl.best_model,
                 "explainer": explainer,
+                "variable_importance": variable_importance,
                 "X_sample": X_sample,
                 "feature_names": feature_names,
                 "dataset_id": dataset_id,
                 "target_column": target_column,
                 "task_type": actual_task_type,
+                "engine": results.get("engine", "sklearn"),
                 "best_model_name": results["best_model"],
                 "best_score": best_score,
                 "all_results": results["all_results"],
@@ -354,6 +372,7 @@ class ModelService:
             "metrics": {
                 "best_score": model_info["best_score"],
                 "task_type": model_info["task_type"],
+                "engine": model_info.get("engine", "sklearn"),
             },
             "all_models": model_info["all_results"],
         }
@@ -520,6 +539,18 @@ class ModelService:
                     "importance_values": [float(p[1]) for p in feat_pairs],
                     "method": "tree_feature_importance",
                 }
+            # Fallback for H2O-trained models: SHAP can't introspect H2O models, so use
+            # the variable importance H2O itself computed during training.
+            variable_importance = model_info.get("variable_importance")
+            if variable_importance:
+                feat_pairs = sorted(
+                    variable_importance.items(), key=lambda x: abs(x[1]), reverse=True
+                )[:top_n]
+                return {
+                    "features": [p[0] for p in feat_pairs],
+                    "importance_values": [float(p[1]) for p in feat_pairs],
+                    "method": "h2o_variable_importance",
+                }
             raise ValueError(f"SHAP explainer not initialized for model {model_id}")
 
         # Get global importance
@@ -536,17 +567,39 @@ class ModelService:
 
         model_info = self.models[model_id]
         explainer = model_info.get("explainer")
-        if explainer is None:
-            raise ValueError(f"SHAP explainer not available for model {model_id}")
+        feature_names = model_info.get("feature_names", [])
 
         # Convert to DataFrame and align features
         df = pd.DataFrame([instance])
-        feature_names = model_info.get("feature_names", [])
         if feature_names:
             for f in feature_names:
                 if f not in df.columns:
                     df[f] = 0.0
             df = df[feature_names]
+
+        if explainer is None:
+            # SHAP doesn't understand H2O models; fall back to H2O's own
+            # per-instance feature contributions (predict_contributions).
+            model = model_info.get("model")
+            if model is not None and hasattr(model, "predict_contributions"):
+                try:
+                    contributions = model.predict_contributions(df)
+                    return {
+                        "contributions": contributions,
+                        "method": "h2o_predict_contributions",
+                    }
+                except Exception as exc:
+                    logger.warning(f"H2O per-instance contributions failed for model {model_id}: {exc}")
+                    # Last resort: the global variable importance isn't instance-
+                    # specific, but it's still more useful than a hard failure.
+                    variable_importance = model_info.get("variable_importance")
+                    if variable_importance:
+                        return {
+                            "contributions": variable_importance,
+                            "method": "h2o_variable_importance_fallback",
+                            "note": "Per-instance explanation unavailable for this model type; showing global feature importance instead.",
+                        }
+            raise ValueError(f"SHAP explainer not available for model {model_id}")
 
         # Get explanation
         explanation = explainer.explain_instance(df)
@@ -607,6 +660,28 @@ class ModelService:
     def delete_model(self, model_id: str):
         """Delete a model, its metadata, and its files on disk."""
         if model_id in self.models:
+            model_info = self.models[model_id]
+            model = model_info.get("model")
+            # H2OAutoML trains a whole leaderboard per run (GBM/DRF/GLM/XGBoost/
+            # StackedEnsemble variants), not just the leader — all of them stay
+            # resident in the cluster's memory until explicitly removed, or they
+            # leak RAM indefinitely. all_model_ids covers the full run; fall back
+            # to the single leader id for older records that predate this field.
+            all_model_ids = getattr(model, "all_model_ids", None) or (
+                [model.h2o_model_id] if getattr(model, "h2o_model_id", None) else []
+            )
+            if all_model_ids:
+                try:
+                    import h2o
+                    for h2o_id in all_model_ids:
+                        try:
+                            h2o.remove(h2o_id)
+                        except Exception as exc:
+                            logger.warning(f"Could not remove H2O model {h2o_id} from cluster: {exc}")
+                    logger.info(f"Removed {len(all_model_ids)} H2O model(s) from cluster for {model_id}")
+                except Exception as exc:
+                    logger.warning(f"Could not clean up H2O models for {model_id}: {exc}")
+
             del self.models[model_id]
             cache_delete(f"model:{model_id}")
             logger.info(f"Model {model_id} deleted")

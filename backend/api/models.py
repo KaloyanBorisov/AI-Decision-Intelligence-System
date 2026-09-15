@@ -27,6 +27,10 @@ class TrainModelRequest(BaseModel):
     task_type: str = "auto"  # 'classification', 'regression', or 'auto'
     test_size: float = 0.2
     experiment_name: str = "AutoML"
+    use_h2o: bool = True  # try the H2O cluster first when available
+    h2o_max_runtime_secs: int = 180  # search budget when H2O is used for training
+    use_flaml: bool = False  # opt-in in-process AutoML alternative to H2O
+    flaml_time_budget_secs: int = 180  # search budget when FLAML is used for training
 
 
 class TrainModelResponse(BaseModel):
@@ -120,6 +124,10 @@ async def train_model(request: TrainModelRequest, background_tasks: BackgroundTa
             task_type=request.task_type,
             test_size=request.test_size,
             experiment_name=request.experiment_name,
+            use_h2o=request.use_h2o,
+            h2o_max_runtime_secs=request.h2o_max_runtime_secs,
+            use_flaml=request.use_flaml,
+            flaml_time_budget_secs=request.flaml_time_budget_secs,
         )
 
         return TrainModelResponse(

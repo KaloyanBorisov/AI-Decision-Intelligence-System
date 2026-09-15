@@ -42,7 +42,14 @@ class AutoML:
     """
 
     def __init__(
-        self, task_type: str = "auto", test_size: float = 0.2, random_state: int = 42
+        self,
+        task_type: str = "auto",
+        test_size: float = 0.2,
+        random_state: int = 42,
+        use_h2o: bool = True,
+        h2o_max_runtime_secs: int = 180,
+        use_flaml: bool = False,
+        flaml_time_budget_secs: int = 180,
     ):
         """
         Initialize AutoML engine
@@ -51,19 +58,30 @@ class AutoML:
             task_type: 'classification', 'regression', 'time_series', or 'auto' (auto-detect)
             test_size: Proportion of dataset to use for testing
             random_state: Random seed for reproducibility
+            use_h2o: Whether to use H2O-3 cluster for training when available
+            use_flaml: Whether to use FLAML's in-process AutoML search when
+                available. Opt-in and off by default; if both use_h2o and
+                use_flaml are True, H2O is tried first (existing behavior) and
+                FLAML is only used if H2O is unavailable or fails.
         """
         self.task_type = task_type
         self.test_size = test_size
         self.random_state = random_state
+        self.use_h2o = use_h2o
+        self.h2o_max_runtime_secs = h2o_max_runtime_secs
+        self.use_flaml = use_flaml
+        self.flaml_time_budget_secs = flaml_time_budget_secs
         self.best_model = None
         self.best_model_name = None
         self.best_score = None
         self.models = {}
         self.results = {}
         self.date_column = None  # For time-series tasks
+        self.mojo_path = None
+        self.variable_importance = None
 
         logger.info(
-            f"Initialized AutoML with task_type={task_type}, test_size={test_size}"
+            f"Initialized AutoML with task_type={task_type}, test_size={test_size}, use_h2o={use_h2o}"
         )
 
     def detect_task_type(self, X: pd.DataFrame, y: pd.Series) -> str:
@@ -460,6 +478,88 @@ class AutoML:
                 X, y, dataset_id, experiment_name, log_artifacts=log_artifacts
             )
 
+        # Check H2O cluster availability
+        if self.use_h2o and self.task_type != "time_series":
+            try:
+                from .h2o_engine import is_h2o_available, H2OAutoMLEngine
+                if is_h2o_available():
+                    logger.info("H2O cluster is available. Executing AutoML in H2O-3 container...")
+                    engine = H2OAutoMLEngine(
+                        task_type=self.task_type,
+                        seed=self.random_state,
+                        max_runtime_secs=self.h2o_max_runtime_secs,
+                    )
+                    df_combined = X.copy()
+                    target_name = y.name if getattr(y, "name", None) else "target"
+                    df_combined[target_name] = y.values
+                    h2o_res = engine.fit(
+                        df=df_combined,
+                        target_column=target_name,
+                        task_type=self.task_type,
+                        dataset_id=dataset_id,
+                        experiment_name=experiment_name,
+                        log_artifacts=log_artifacts,
+                    )
+                    self.best_model_name = h2o_res["best_model"]
+                    self.best_model = h2o_res["model"]
+                    self.best_score = h2o_res["best_score"]
+                    self.task_type = h2o_res["task_type"]
+                    self.results = h2o_res["all_results"]
+                    self.models = {h2o_res["best_model"]: h2o_res["model"]}
+                    self.feature_names = h2o_res["feature_names"]
+                    self.mojo_path = h2o_res.get("mojo_path")
+                    self.variable_importance = h2o_res.get("variable_importance")
+                    self.all_model_ids = h2o_res.get("all_model_ids")
+                    return {
+                        "engine": "h2o",
+                        "best_model": self.best_model_name,
+                        "best_score": self.best_score,
+                        "all_results": h2o_res["all_results"],
+                        "all_model_ids": self.all_model_ids,
+                        "task_type": self.task_type,
+                        "mojo_path": self.mojo_path,
+                        "variable_importance": self.variable_importance,
+                    }
+            except Exception as exc:
+                logger.warning(f"H2O execution attempt failed ({exc}). Falling back to Scikit-Learn/GBM...")
+
+        # Check FLAML availability (in-process, no cluster/network probe needed)
+        if self.use_flaml and self.task_type != "time_series":
+            try:
+                from .flaml_engine import is_flaml_available, FLAMLEngine
+                if is_flaml_available():
+                    logger.info("Running AutoML search via FLAML (in-process)...")
+                    engine = FLAMLEngine(
+                        task_type=self.task_type,
+                        seed=self.random_state,
+                        time_budget_secs=self.flaml_time_budget_secs,
+                    )
+                    flaml_res = engine.fit(
+                        X, y,
+                        task_type=self.task_type,
+                        dataset_id=dataset_id,
+                        experiment_name=experiment_name,
+                        log_artifacts=log_artifacts,
+                    )
+                    self.best_model_name = flaml_res["best_model"]
+                    self.best_model = flaml_res["model"]
+                    self.best_score = flaml_res["best_score"]
+                    self.task_type = flaml_res["task_type"]
+                    self.results = flaml_res["all_results"]
+                    self.models = {flaml_res["best_model"]: flaml_res["model"]}
+                    self.feature_names = flaml_res["feature_names"]
+                    self.variable_importance = flaml_res.get("variable_importance")
+                    return {
+                        "engine": "flaml",
+                        "best_model": self.best_model_name,
+                        "best_score": self.best_score,
+                        "all_results": flaml_res["all_results"],
+                        "task_type": self.task_type,
+                        "variable_importance": self.variable_importance,
+                    }
+            except Exception as exc:
+                logger.warning(f"FLAML execution attempt failed ({exc}). Falling back to Scikit-Learn/GBM...")
+
         # Preprocess features and target
         X_clean, y_clean = self.preprocess_fit(X, y)
         X = X_clean
@@ -606,6 +706,7 @@ class AutoML:
         self.models = {name: res["model"] for name, res in results.items()}
 
         return {
+            "engine": "sklearn",
             "best_model": self.best_model_name,
             "best_score": self.best_score,
             "all_results": {name: res["metrics"] for name, res in results.items()},
@@ -632,6 +733,10 @@ class AutoML:
         if self.best_model is None:
             raise ValueError("No model has been trained yet")
 
+        # Check if H2O model wrapper
+        if hasattr(self.best_model, "mojo_path") or type(self.best_model).__name__ == "H2OModelWrapper":
+            return self.best_model.predict(X)
+
         X_trans = self.transform(X)
         preds = self.best_model.predict(X_trans)
         if getattr(self, "target_encoder", None) is not None:
@@ -645,6 +750,9 @@ class AutoML:
         """Get prediction probabilities (classification only)"""
         if self.best_model is None:
             raise ValueError("No model has been trained yet")
+
+        if hasattr(self.best_model, "mojo_path") or type(self.best_model).__name__ == "H2OModelWrapper":
+            return self.best_model.predict_proba(X)
 
         X_trans = self.transform(X)
         if hasattr(self.best_model, "predict_proba"):

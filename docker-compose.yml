@@ -8,10 +8,14 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app:/app/backend:.
+      - H2O_URL=http://h2o:54321
     depends_on:
       redis:
         condition: service_healthy
+      h2o:
+        condition: service_healthy
     volumes:
+      - ./backend:/app/backend
       - uploads:/app/uploads
       - mlflow_data:/app/mlops
       - storage_data:/app/storage
@@ -44,6 +48,29 @@ services:
       timeout: 10s
       retries: 3
 
+  h2o:
+    # Despite the "-k8s" tag, this is H2O.ai's standard minimal open-source H2O-3 image
+    # (plain JVM process on port 54321) and runs fine under docker-compose; it's the only
+    # official plain-H2O image they publish, there's no non-"-k8s" equivalent.
+    # Keep this pinned to the exact same version as h2o== in backend/requirements.txt,
+    # or the h2o-py client will reject the version mismatch and silently fall back.
+    image: h2oai/h2o-open-source-k8s:3.46.0.1
+    ports:
+      - "54321:54321"
+    environment:
+      - H2O_NAME=ai_decision_cluster
+      - H2O_MEM_SIZE=4g
+    volumes:
+      - uploads:/app/uploads
+      - models_data:/app/models
+      - h2o_data:/opt/h2o/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:54321/3/About"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:v3.16.0
     ports:
@@ -66,6 +93,7 @@ services:
       - PYTHONPATH=/app:/app/backend:.
       - BACKEND_URL=http://backend:8000
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - H2O_URL=http://h2o:54321
     volumes:
       - ./notebooks:/app/notebooks
       - ./models:/app/models
@@ -76,6 +104,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      h2o:
+        condition: service_healthy
 
 volumes:
   redis_data:
@@ -83,3 +113,4 @@ volumes:
   uploads:
   storage_data:
   models_data:
+  h2o_data:

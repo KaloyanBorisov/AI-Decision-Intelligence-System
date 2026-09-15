@@ -13,6 +13,9 @@ python-multipart==0.0.21
 
 # Authentication & Security
 python-jose[cryptography]==3.3.0
+# Not imported directly (bcrypt is used directly for hashing), but
+# backend/utils/production_checks.py checks for it as a "critical dependency"
+# at startup — removing it trips a false production-readiness error.
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 
@@ -37,6 +40,16 @@ pyarrow==22.0.0
 scikit-learn==1.8.0
 xgboost==3.1.2
 lightgbm==4.6.0
+# Must exactly match the h2oai/h2o-open-source-k8s image tag in docker-compose.yml.
+# The h2o-py client rejects a version-mismatched remote cluster and silently falls
+# back to launching its own local JVM (which then fails without a JRE) — bumping
+# one without the other reintroduces that failure mode.
+h2o==3.46.0.1
+# In-process AutoML alternative to H2O — no cluster/JVM, tunes the LightGBM/
+# XGBoost/RandomForest models already listed above. Selected via use_flaml=
+# True on AutoML() (see automl.py); off by default, H2O keeps priority when
+# both are enabled.
+flaml==2.3.6
 joblib==1.5.3
 shap==0.51.0
 matplotlib==3.10.8
@@ -55,9 +68,11 @@ celery==5.4.0
 redis==7.1.0
 
 # AI Copilot & LLMs
+# openai/tiktoken/langchain-openai aren't imported directly anywhere, but
+# langchain.embeddings.OpenAIEmbeddings (backend/copilot/rag.py) needs them
+# transitively at runtime — keep them despite no direct `import openai` etc.
 openai==2.14.0
 tiktoken==0.12.0
 langchain==1.2.0
 langchain-openai==1.1.6
-google-generativeai==0.8.4
 anthropic==0.69.0

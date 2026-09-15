@@ -87,9 +87,18 @@ def train_model_task(
             meta={"progress": 80, "message": "Generating explanations..."},
         )
 
-        # Create explainer
-        explainer = ModelExplainer(
-            automl.best_model, X_encoded.sample(min(100, len(X_encoded)))
+        # Create explainer safely (SHAP doesn't understand H2O models, so fall back
+        # to the variable importance H2O itself computed during training)
+        explainer = None
+        try:
+            sample_size = min(100, len(X_encoded))
+            explainer = ModelExplainer(
+                automl.best_model, X_encoded.sample(sample_size)
+            )
+        except Exception as explainer_err:
+            logger.warning(f"Could not initialize explainer for best model: {explainer_err}")
+        variable_importance = results.get("variable_importance") or getattr(
+            automl, "variable_importance", None
         )
 
         # Save model
@@ -103,10 +112,12 @@ def train_model_task(
             "automl": automl,
             "model": automl.best_model,
             "explainer": explainer,
+            "variable_importance": variable_importance,
             "X_sample": X_encoded.sample(min(100, len(X_encoded))),
             "feature_names": X_encoded.columns.tolist(),
             "target_column": target_column,
             "task_type": results["task_type"],
+            "engine": results.get("engine", "sklearn"),
             "best_model_name": results["best_model"],
             "best_score": results["best_score"],
             "all_results": results["all_results"],

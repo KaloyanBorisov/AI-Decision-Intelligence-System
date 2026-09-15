@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "file:./mlops/experiments"
     mlflow_experiment_name: str = "Decisera"
 
+    # H2O
+    h2o_url: str = Field(
+        default="http://localhost:54321",
+        validation_alias=AliasChoices("H2O_URL", "h2o_url"),
+        description="H2O cluster URL for AutoML training",
+    )
+
     # OpenAI
     openai_api_key: str = ""
 
