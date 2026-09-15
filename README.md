@@ -76,14 +76,24 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
 │  - JWT Bearer Authentication & PBKDF2 / Bcrypt hashing      │
 │  - Presentation / API Routing Layer (`backend/api/`)         │
 │  - Service & Business Logic Layer (`backend/services/`)     │
+│  - Dual AutoML engines: H2O cluster & in-process FLAML       │
+│  - Selectable execution mode per /train request:             │
+│    in-process (FastAPI BackgroundTasks) or Celery worker    │
 └──────────────┬───────────────────────────────┬──────────────┘
-               │ Queues Tasks                  │ Tracks Models & Runs
+               │ Queues Tasks (use_celery=true) │ Tracks Models & Runs
                ▼                               ▼
 ┌────────────────────────────┐    ┌───────────────────────────┐
 │     MLOps Worker Layer     │    │      Model Registry       │
-│  Celery Workers + Redis    │    │       MLflow Server       │
-│  - Async AutoML & Tuning   │    │  - Experiment Lineage     │
-│  - Batch Inferences        │    │  - Model Artifact Store   │
+│  celery_worker + Redis     │    │       MLflow Server       │
+│  - Dedicated worker         │    │  - Experiment Lineage     │
+│    container/process        │    │  - Model Artifact Store   │
+│  - Delegates to the same    │    │                            │
+│    model_service training   │    │                            │
+│    path as the in-process   │    │                            │
+│    mode (single source of   │    │                            │
+│    truth for AutoML fit)    │    │                            │
+│  - Async AutoML & Tuning   │    │                            │
+│  - Batch Inferences        │    │                            │
 └──────────────┬─────────────┘    └────────────┬──────────────┘
                │                               │
                └───────────────┬───────────────┘
@@ -93,6 +103,15 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
 │  • models_data: Serialized .joblib estimators & pipelines   │
 │  • storage_data: SQLite (decisera.db) / PostgreSQL metadata │
 │  • uploads & mlflow_data: Datasets & Experiment artifacts   │
+│  • Redis: also mirrors task status, so both the API process │
+│    and celery_worker can serve GET /tasks/{id}/status       │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                Hermes Agent Sidecar (optional)               │
+│  Long-running TUI/agent container with read access to the   │
+│  backend's uploads & models volumes, talking to the backend │
+│  API and MLflow over the internal Docker network.            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -109,8 +128,10 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
    - **Domain / ML Pipeline Layer (`backend/ml/`):** Data profiling, automated cleaning, AutoML model training, Optuna hyperparameter optimization, and TreeSHAP/KernelSHAP explainability.
    - **Data Access & Storage Layer (`backend/utils/storage.py`):** SQLAlchemy ORM managing SQLite/PostgreSQL persistence.
 
-3. **Execution Pattern — Asynchronous Task-Worker Architecture:**
-   - Compute-intensive operations (AutoML training, hyperparameter search, large batch scoring) are offloaded to **Celery** workers backed by a **Redis** message broker.
+3. **Execution Pattern — Selectable Asynchronous Task-Worker Architecture:**
+   - Training requests carry a `use_celery` flag: by default they run **in-process** via FastAPI `BackgroundTasks` (no extra container needed); when set, they're dispatched with `.delay()` to a dedicated **`celery_worker`** container/process backed by **Redis**.
+   - Both execution modes converge on the same `model_service.train_model_async` code path, so there is exactly one implementation of data prep, AutoML fitting, explainability, and model persistence regardless of where it runs.
+   - Task status is mirrored to Redis on every update, so `GET /tasks/{id}/status` on the API process can see progress written by a separate `celery_worker` process, not just tasks it ran itself.
    - Endpoints immediately return `202 Accepted` with a `task_id`, allowing non-blocking progress polling and maintaining low latency for real-time traffic.
 
 4. **MLOps Pattern — Decoupled Model Storage & Lifecycle Management:**
@@ -120,6 +141,13 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
 
 5. **AI Pattern — ReAct / Tool-Augmented AI Copilot (RAG):**
    - The AI Copilot (`backend/copilot/`) functions as an autonomous tool-calling agent. It inspects datasets, runs statistical tools, retrieves domain context via RAG, and generates plain-language business recommendations.
+
+6. **AutoML Engine Selection — H2O vs. FLAML:**
+   - Decisera supports two interchangeable AutoML backends selectable per training request: the existing **H2O** cluster (`backend/ml/h2o_engine.py`) and an in-process **FLAML** engine, with automatic fallback to scikit-learn when neither is requested or available.
+   - This keeps training available even when the H2O Java process is unhealthy or the deployment target can't run a separate H2O container, at the cost of FLAML/sklearn generally searching a narrower model space than H2O's cluster-backed AutoML.
+
+7. **Optional Agent Sidecar — Hermes:**
+   - An optional `hermes` container runs a long-lived TUI-based coding/ops agent alongside the stack, with read access to the `uploads` and `models` volumes and network access to the backend API and MLflow — useful for interactively inspecting or operating on the running deployment without a separate host shell.
 
 ---
 
@@ -204,9 +232,11 @@ docker compose up --build -d
 | Container | Image Tag | Host Port | Health Check |
 |:---|:---|:---|:---|
 | `backend` | `ai-decision-backend:latest` | `8000` | `curl -f http://localhost:8000/api/v1/health` (HTTP 200) |
+| `celery_worker` | `ai-decision-backend:latest` | — | Consumes training tasks from Redis (`use_celery=true` on `/train`); no worker running means those tasks queue but never execute |
 | `frontend` | `ai-decision-frontend:latest` | `3000` | Nginx Static Server + Internal Network Routing |
 | `redis` | `redis:alpine` | `6379` | `redis-cli ping` (PONG) |
 | `mlflow` | `ghcr.io/mlflow/mlflow` | `5000` | Artifact & Experiment Registry |
+| `hermes` | `ai-decision-hermes:latest` | — | Optional long-running agent sidecar with read access to `uploads`/`models` volumes |
 
 ### Verifying Container Health
 ```bash
