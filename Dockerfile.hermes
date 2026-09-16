@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies & Node.js (required for Hermes TUI interface)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ripgrep \
+    procps \
+    build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast Python package management
+RUN pip install --no-cache-dir uv requests httpx pandas pydantic
+
+# Install hermes-agent from repository
+RUN pip install --no-cache-dir git+https://github.com/KaloyanBorisov/hermes-agent.git || \
+    pip install --no-cache-dir hermes-agent || true
+
+# Prepare Hermes directories
+RUN mkdir -p /root/.hermes/skills /root/.hermes/memory /app/uploads /app/models
+
+ENV PYTHONUNBUFFERED=1 \
+    DECISERA_BACKEND_URL=http://backend:8000 \
+    MLFLOW_TRACKING_URI=http://mlflow:5000 \
+    H2O_URL=http://h2o:54321
+
+CMD ["tail", "-f", "/dev/null"]

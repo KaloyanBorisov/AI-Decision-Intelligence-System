@@ -16,6 +16,10 @@ export interface TrainModelRequest {
     dataset_id: string;
     target_column: string;
     task_type?: string;
+    use_h2o?: boolean;
+    use_flaml?: boolean;
+    flaml_time_budget_secs?: number;
+    use_celery?: boolean;
 }
 
 export interface PredictionResult {

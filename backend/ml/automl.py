@@ -519,6 +519,7 @@ class AutoML:
                         "task_type": self.task_type,
                         "mojo_path": self.mojo_path,
                         "variable_importance": self.variable_importance,
+                        "run_id": h2o_res.get("run_id"),
                     }
             except Exception as exc:
                 logger.warning(f"H2O execution attempt failed ({exc}). Falling back to Scikit-Learn/GBM...")
@@ -556,6 +557,7 @@ class AutoML:
                         "all_results": flaml_res["all_results"],
                         "task_type": self.task_type,
                         "variable_importance": self.variable_importance,
+                        "run_id": flaml_res.get("run_id"),
                     }
             except Exception as exc:
                 logger.warning(f"FLAML execution attempt failed ({exc}). Falling back to Scikit-Learn/GBM...")
@@ -711,6 +713,7 @@ class AutoML:
             "best_score": self.best_score,
             "all_results": {name: res["metrics"] for name, res in results.items()},
             "task_type": self.task_type,
+            "run_id": results[self.best_model_name].get("run_id"),
         }
 
     def save_model(self, filepath: str):

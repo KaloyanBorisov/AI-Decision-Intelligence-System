@@ -27,6 +27,31 @@ services:
       retries: 5
       start_period: 15s
 
+  celery_worker:
+    # Runs the same backend image, but as a Celery worker consuming training
+    # tasks from Redis instead of serving HTTP. This is what actually executes
+    # jobs dispatched with use_celery=true on /train; without this service
+    # running, those tasks queue in Redis but never get picked up.
+    image: ai-decision-backend:latest
+    build: .
+    command: celery -A backend.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app:/app/backend:.
+      - H2O_URL=http://h2o:54321
+    depends_on:
+      redis:
+        condition: service_healthy
+      h2o:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app/backend
+      - uploads:/app/uploads
+      - mlflow_data:/app/mlops
+      - storage_data:/app/storage
+      - models_data:/app/models
+
   frontend:
     image: ai-decision-frontend:latest
     build: ./frontend
@@ -81,6 +106,32 @@ services:
     volumes:
       - mlflow_data:/mlflow
 
+  # `mlflow server`'s own process only ever soft-deletes runs (delete_model in
+  # the backend marks them lifecycle_stage=deleted); nothing about the server
+  # itself ever reclaims disk. mlflow gc permanently purges soft-deleted runs
+  # and their artifacts, but needs direct access to the same sqlite DB and
+  # artifact root, so it has to run against this volume rather than through
+  # the mlflow container's REST API -- hence a separate sidecar sharing the
+  # same volume instead of cramming it into the server container's entrypoint.
+  mlflow-gc:
+    image: ghcr.io/mlflow/mlflow:v3.16.0
+    environment:
+      - MLFLOW_TRACKING_URI=sqlite:////mlflow/mlflow.db
+    volumes:
+      - mlflow_data:/mlflow
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          echo "[mlflow-gc] $(date -u +%FT%TZ) running mlflow gc";
+          mlflow gc --backend-store-uri sqlite:////mlflow/mlflow.db --artifacts-destination /mlflow || echo "[mlflow-gc] gc run failed, will retry next cycle";
+          sleep 86400;
+        done
+    depends_on:
+      - mlflow
+    restart: unless-stopped
+
   jupyter:
     image: ai-decision-jupyter:latest
     build:
@@ -107,6 +158,42 @@ services:
       h2o:
         condition: service_healthy
 
+  hermes:
+    image: ai-decision-hermes:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes
+    container_name: hermes
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    # Docker Compose's built-in tini as PID 1 instead of raw `tail`, so exited
+    # children (apt-get/dpkg/pip left running by the agent, orphaned TUI
+    # subprocesses, ...) actually get reaped instead of piling up as zombies.
+    init: true
+    command: tail -f /dev/null
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app:/app/hermes:.
+      - DECISERA_BACKEND_URL=http://backend:8000
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - H2O_URL=http://h2o:54321
+    # Each `hermes --tui` session (docker exec) spawns its own Node+Python
+    # stack (~450-500MB) that isn't torn down automatically when sessions are
+    # left open -- cap the container so an accumulation of stale sessions
+    # can't quietly consume unbounded host RAM the way H2O did before
+    # H2O_MEM_SIZE was tuned.
+    mem_limit: 3g
+    volumes:
+      - hermes_data:/root/.hermes
+      - ./hermes:/app/hermes
+      - uploads:/app/uploads:ro
+      - models_data:/app/models:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   redis_data:
   mlflow_data:
@@ -114,3 +201,4 @@ volumes:
   storage_data:
   models_data:
   h2o_data:
+  hermes_data:

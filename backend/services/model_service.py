@@ -81,6 +81,9 @@ class ModelRegistry:
                 # Which MLflow experiment this model was trained under, so
                 # inference traces can be routed back to it later.
                 "mlflow_experiment_name": info.get("mlflow_experiment_name", ""),
+                # The training run whose artifacts (MOJO/pickled model) back
+                # this model, so they can be cleaned up on delete_model.
+                "mlflow_run_id": info.get("mlflow_run_id", ""),
             },
         )
         self._cache[model_id] = info
@@ -136,6 +139,7 @@ class ModelRegistry:
             "all_results": data.get("all_results", {}),
             "created_at": data.get("created_at", ""),
             "mlflow_experiment_name": data.get("mlflow_experiment_name", ""),
+            "mlflow_run_id": data.get("mlflow_run_id", ""),
         }
         self._cache[model_id] = entry
         return entry
@@ -185,7 +189,7 @@ class ModelService:
         self.model_dir = Path("models")
         self.model_dir.mkdir(exist_ok=True)
         self.models = ModelRegistry(self.model_dir)
-        self.tasks = {}  # Task status tracking
+        self.tasks = {}  # Task status tracking (fast in-process path; see _set_task_status)
         self._traced_experiment: Optional[str] = None  # avoids redundant set_experiment calls
 
     def _use_experiment_for_tracing(self, model_info: Dict[str, Any]) -> None:
@@ -225,6 +229,37 @@ class ModelService:
 
         return df
 
+    @staticmethod
+    def _json_safe(obj: Any) -> Any:
+        """Recursively replace NaN/Infinity floats with None.
+
+        Some AutoML candidates (e.g. FLAML's lrl1 on a tiny/degenerate split)
+        can report an inf/nan loss. Python's json module happily round-trips
+        those through Redis, but Starlette's JSONResponse rejects them
+        (allow_nan=False), 500ing GET /tasks/{id}/status. Sanitize before
+        this ever reaches storage or the API response.
+        """
+        if isinstance(obj, float):
+            return obj if np.isfinite(obj) else None
+        if isinstance(obj, dict):
+            return {k: ModelService._json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [ModelService._json_safe(v) for v in obj]
+        return obj
+
+    def _set_task_status(self, task_id: str, data: Dict[str, Any]) -> None:
+        """Write task status to the in-process dict and to Redis.
+
+        Training can run either in-process (FastAPI BackgroundTasks) or in a
+        separate Celery worker process/container. The in-memory dict alone is
+        invisible across processes, so every status update is also mirrored to
+        Redis (best-effort — cache_set no-ops if Redis is unavailable) under a
+        shared key, which get_task_status() checks as a fallback.
+        """
+        data = self._json_safe(data)
+        self.tasks[task_id] = data
+        cache_set(f"task_status:{task_id}", data, ttl=86400)
+
     def train_model_async(
         self,
         task_id: str,
@@ -246,11 +281,11 @@ class ModelService:
             logger.info(f"Starting async training for task {task_id}")
 
             # Update task status
-            self.tasks[task_id] = {
+            self._set_task_status(task_id, {
                 "status": "running",
                 "message": "Model training in progress",
                 "progress": 0,
-            }
+            })
 
             # Prepare data: drop any rows where target is missing
             valid_mask = dataset_df[target_column].notna()
@@ -273,8 +308,11 @@ class ModelService:
             )
 
             # Update progress
-            self.tasks[task_id]["progress"] = 20
-            self.tasks[task_id]["message"] = "Training models..."
+            self._set_task_status(task_id, {
+                **self.tasks.get(task_id, {}),
+                "progress": 20,
+                "message": "Training models...",
+            })
 
             # Train models
             results = automl.fit(
@@ -282,8 +320,11 @@ class ModelService:
             )
 
             # Update progress
-            self.tasks[task_id]["progress"] = 80
-            self.tasks[task_id]["message"] = "Generating explanations..."
+            self._set_task_status(task_id, {
+                **self.tasks.get(task_id, {}),
+                "progress": 80,
+                "message": "Generating explanations...",
+            })
 
             # Create explainer using clean processed data
             if (
@@ -333,31 +374,40 @@ class ModelService:
                 "all_results": results["all_results"],
                 "created_at": datetime.utcnow().isoformat(),
                 "mlflow_experiment_name": experiment_name,
+                "mlflow_run_id": results.get("run_id") or "",
             }
 
             # Update task status
-            self.tasks[task_id] = {
+            self._set_task_status(task_id, {
                 "status": "completed",
                 "message": f"Training completed. Best model: {results['best_model']}",
                 "progress": 100,
                 "model_id": model_id,
                 "results": results,
-            }
+            })
 
             logger.info(f"Training completed for task {task_id}")
 
         except Exception as e:
             logger.error(f"Training failed for task {task_id}: {e}")
-            self.tasks[task_id] = {
+            self._set_task_status(task_id, {
                 "status": "failed",
                 "message": f"Training failed: {str(e)}",
                 "progress": 0,
                 "error": str(e),
-            }
+            })
 
     def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Get status of a training task"""
-        return self.tasks.get(task_id)
+        """Get status of a training task.
+
+        Checks the in-process dict first (fast path for tasks run via
+        BackgroundTasks in this same process), then falls back to Redis
+        (needed when the task was run by a separate Celery worker process).
+        """
+        status = self.tasks.get(task_id)
+        if status is not None:
+            return status
+        return cache_get(f"task_status:{task_id}")
 
     def get_model_metrics(self, model_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed metrics for a trained model"""
@@ -681,6 +731,23 @@ class ModelService:
                     logger.info(f"Removed {len(all_model_ids)} H2O model(s) from cluster for {model_id}")
                 except Exception as exc:
                     logger.warning(f"Could not clean up H2O models for {model_id}: {exc}")
+
+            # Unlike H2O's in-memory DKV, MLflow's training-run artifacts
+            # (MOJO/pickled model, params, metrics) live on the mlflow
+            # container's disk and are kept forever by default -- nothing
+            # prunes them on its own. Soft-delete the run here so it stops
+            # counting against that unbounded growth; an operator still
+            # needs to run `mlflow gc` periodically against the same
+            # backend-store/artifact-root to actually reclaim the disk
+            # space, since the REST client can only mark runs deleted.
+            mlflow_run_id = model_info.get("mlflow_run_id")
+            if mlflow_run_id:
+                try:
+                    from mlflow.tracking import MlflowClient
+                    MlflowClient().delete_run(mlflow_run_id)
+                    logger.info(f"Marked MLflow run {mlflow_run_id} deleted for {model_id}")
+                except Exception as exc:
+                    logger.warning(f"Could not delete MLflow run {mlflow_run_id} for {model_id}: {exc}")
 
             del self.models[model_id]
             cache_delete(f"model:{model_id}")

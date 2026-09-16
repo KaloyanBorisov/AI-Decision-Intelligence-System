@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getModels, trainModel, getModelMetrics, ModelSummary } from '../services/modelService';
+import { getModels, trainModel, getModelMetrics, deleteModel, ModelSummary } from '../services/modelService';
 import { getDatasets, getDatasetColumns } from '../services/datasetService';
 import { useToast } from '../context/ToastProvider';
 import { Cpu, Plus, Trash2, Eye, Loader2 } from 'lucide-react';
@@ -17,7 +17,10 @@ const ModelPerformance: React.FC = () => {
     const [selectedModel, setSelectedModel] = useState<string | null>(null);
     const [modelMetrics, setModelMetrics] = useState<any>(null);
     const [metricsLoading, setMetricsLoading] = useState(false);
+    const [deletingModel, setDeletingModel] = useState<string | null>(null);
     const [trainForm, setTrainForm] = useState({ dataset_id: '', target_column: '', task_type: 'auto' });
+    const [engine, setEngine] = useState<'auto' | 'h2o' | 'flaml'>('auto');
+    const [useCelery, setUseCelery] = useState(false);
     const [availableColumns, setAvailableColumns] = useState<string[]>([]);
     const [loadingCols, setLoadingCols] = useState(false);
     const { addToast } = useToast();
@@ -67,10 +70,16 @@ const ModelPerformance: React.FC = () => {
         }
         setTraining(true);
         try {
-            await trainModel(trainForm);
+            const engineParams =
+                engine === 'h2o' ? { use_h2o: true, use_flaml: false } :
+                engine === 'flaml' ? { use_h2o: false, use_flaml: true } :
+                { use_h2o: true, use_flaml: true }; // auto: H2O first, FLAML then sklearn as fallback
+            await trainModel({ ...trainForm, ...engineParams, use_celery: useCelery });
             addToast('Model training started!', 'success');
             setShowTrainModal(false);
             setTrainForm({ dataset_id: '', target_column: '', task_type: 'auto' });
+            setEngine('auto');
+            setUseCelery(false);
             setAvailableColumns([]);
             // Refresh models list
             const updated = await getModels();
@@ -98,6 +107,26 @@ const ModelPerformance: React.FC = () => {
             addToast('Failed to load model metrics', 'error');
         } finally {
             setMetricsLoading(false);
+        }
+    };
+
+    const handleDeleteModel = async (modelId: string) => {
+        if (!window.confirm('Delete this model? This also frees its resources in H2O and MLflow, and cannot be undone.')) {
+            return;
+        }
+        setDeletingModel(modelId);
+        try {
+            await deleteModel(modelId);
+            setModels((prev) => prev.filter((m) => m.model_id !== modelId));
+            if (selectedModel === modelId) {
+                setSelectedModel(null);
+                setModelMetrics(null);
+            }
+            addToast('Model deleted', 'success');
+        } catch (error: any) {
+            addToast(error?.response?.data?.detail || 'Failed to delete model', 'error');
+        } finally {
+            setDeletingModel(null);
         }
     };
 
@@ -197,6 +226,16 @@ const ModelPerformance: React.FC = () => {
                                     onClick={() => handleViewMetrics(model.model_id)}
                                 >
                                     {selectedModel === model.model_id ? 'Hide Details' : 'View Details'}
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    leftIcon={<Trash2 size={14} />}
+                                    onClick={() => handleDeleteModel(model.model_id)}
+                                    loading={deletingModel === model.model_id}
+                                    disabled={deletingModel !== null}
+                                >
+                                    Delete
                                 </Button>
                             </div>
 
@@ -312,6 +351,33 @@ const ModelPerformance: React.FC = () => {
                                     <option value="auto">Auto-detect</option>
                                     <option value="classification">Classification</option>
                                     <option value="regression">Regression</option>
+                                </select>
+                            </div>
+
+                            <div className={styles.formField}>
+                                <label className={styles.formLabel}>Training Engine</label>
+                                <select
+                                    className={styles.formSelect}
+                                    value={engine}
+                                    onChange={(e) => setEngine(e.target.value as 'auto' | 'h2o' | 'flaml')}
+                                    disabled={training}
+                                >
+                                    <option value="auto">Auto (H2O, falls back to FLAML then sklearn)</option>
+                                    <option value="h2o">H2O only</option>
+                                    <option value="flaml">FLAML only</option>
+                                </select>
+                            </div>
+
+                            <div className={styles.formField}>
+                                <label className={styles.formLabel}>Execution Mode</label>
+                                <select
+                                    className={styles.formSelect}
+                                    value={useCelery ? 'celery' : 'inprocess'}
+                                    onChange={(e) => setUseCelery(e.target.value === 'celery')}
+                                    disabled={training}
+                                >
+                                    <option value="inprocess">In-process (runs on the API server)</option>
+                                    <option value="celery">Celery worker (dispatched via Redis queue)</option>
                                 </select>
                             </div>
                         </div>

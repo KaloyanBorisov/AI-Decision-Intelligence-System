@@ -81,3 +81,15 @@ logs/
 # Data & CSV files
 data/
 *.csv
+
+# Hermes Agent runtime and configuration
+hermes/auth.json
+hermes/config.yaml
+hermes/state.db*
+hermes/projects.db*
+hermes/memories/
+hermes/sessions/
+hermes/logs/
+*.yaml.bak*
+.hermes_history
+hermes_data/

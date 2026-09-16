@@ -287,16 +287,60 @@ class H2OAutoMLEngine:
 
             if self.task_type == "classification":
                 try:
-                    metrics["auc"] = float(perf.auc()) if hasattr(perf, "auc") and perf.auc() is not None else 0.0
-                    metrics["accuracy"] = float(perf.accuracy()[0][1]) if hasattr(perf, "accuracy") and perf.accuracy() else 0.0
+                    # perf.auc() only means something for binary models; for a
+                    # multinomial model H2O still returns it (rather than
+                    # raising), but as a literal NaN. Treat NaN as "not
+                    # available", same as None -- an `or` chain below on a
+                    # NaN would stay NaN (NaN is truthy), poisoning best_score
+                    # and later failing an INTEGRITY NOT NULL check on write
+                    # (Python's sqlite3 binds NaN as NULL).
+                    # H2O can return auc() as the *string* "NaN" (not a float)
+                    # for a model where AUC isn't meaningful (e.g. a
+                    # multinomial leader), so the check has to happen after
+                    # casting to float, not on the raw value's type.
+                    auc_val = perf.auc() if hasattr(perf, "auc") else None
+                    if auc_val is not None:
+                        try:
+                            auc_float = float(auc_val)
+                            if not np.isnan(auc_float):
+                                metrics["auc"] = auc_float
+                        except (TypeError, ValueError):
+                            pass
+
+                    # perf.accuracy() doesn't exist at all on a multinomial
+                    # model's metrics object (raises AttributeError, so
+                    # hasattr(...) is False here) -- only binary models have it.
+                    if hasattr(perf, "accuracy") and perf.accuracy():
+                        metrics["accuracy"] = float(perf.accuracy()[0][1])
+
                     metrics["logloss"] = float(perf.logloss()) if hasattr(perf, "logloss") and perf.logloss() is not None else 0.0
+
+                    # Multinomial-only metric; also serves as a fallback source
+                    # for a bounded, higher-is-better score when neither auc
+                    # nor accuracy was available above.
+                    if hasattr(perf, "mean_per_class_error"):
+                        mpce = perf.mean_per_class_error()
+                        if mpce is not None:
+                            try:
+                                mpce_float = float(mpce)
+                                if not np.isnan(mpce_float):
+                                    metrics["mean_per_class_error"] = mpce_float
+                                    metrics.setdefault("accuracy", 1.0 - mpce_float)
+                            except (TypeError, ValueError):
+                                pass
                 except Exception as exc:
                     # Do NOT fabricate a plausible-looking score here — a made-up
                     # number is worse than a visibly missing one. Surface the
                     # failure so the caller can decide whether to trust this run.
                     logger.error(f"Metrics extraction failed for H2O model {self.leader.model_id if self.leader else '?'}: {exc}")
                     raise RuntimeError(f"Could not extract evaluation metrics from H2O model: {exc}") from exc
-                self.best_score = metrics.get("auc") or metrics.get("accuracy", 0.0)
+
+                self.best_score = metrics.get("auc") or metrics.get("accuracy")
+                if self.best_score is None:
+                    raise RuntimeError(
+                        "Could not determine a valid best_score from H2O's classification "
+                        f"metrics (got: {metrics})"
+                    )
             else:
                 try:
                     metrics["rmse"] = float(perf.rmse()) if hasattr(perf, "rmse") else 0.0
@@ -336,6 +380,28 @@ class H2OAutoMLEngine:
             all_model_ids = list(all_results.keys())
             if self.leader.model_id not in all_model_ids:
                 all_model_ids.append(self.leader.model_id)
+
+            # AutoML trains max_models candidates per run and every one of them
+            # (plus the train/test frames) stays resident in the H2O cluster's
+            # DKV until something removes it -- the leaderboard members other
+            # than the leader are never used again once the leader is picked,
+            # so free them now rather than waiting for model deletion. The
+            # leader itself is left registered for immediate use; if it's later
+            # evicted (h2o.remove_all(), cluster restart), H2OModelWrapper
+            # transparently re-imports it from mojo_path on next predict.
+            for m_id in all_model_ids:
+                if m_id == self.leader.model_id:
+                    continue
+                try:
+                    h2o.remove(m_id)
+                except Exception as exc:
+                    logger.warning(f"Could not remove non-leader H2O model {m_id} from cluster: {exc}")
+
+            for frame in (train_hf, test_hf, hf):
+                try:
+                    h2o.remove(frame)
+                except Exception as exc:
+                    logger.warning(f"Could not remove H2O frame from cluster: {exc}")
 
             # Build wrapper
             classes = [str(c) for c in clean_df[target_column].unique()] if self.task_type == "classification" else []

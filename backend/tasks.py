@@ -3,9 +3,6 @@ Celery tasks for async processing integrated with new AutoML engine
 """
 
 from .celery_app import celery_app
-from backend.ml.automl import AutoML
-from backend.ml.data_preprocessing import DataCleaner, FeatureEngineer
-from backend.ml.explainability import ModelExplainer
 from .services.dataset_service import dataset_service
 from .services.model_service import model_service
 import pandas as pd
@@ -25,9 +22,24 @@ def train_model_task(
     task_type: str = "auto",
     test_size: float = 0.2,
     experiment_name: str = "AutoML",
+    use_h2o: bool = True,
+    h2o_max_runtime_secs: int = 180,
+    use_flaml: bool = False,
+    flaml_time_budget_secs: int = 180,
 ):
     """
-    Async Celery task for model training using AutoML engine
+    Async Celery task for model training. Runs in a separate `celery_worker`
+    container/process from the FastAPI API server (see docker-compose.yml),
+    dispatched via .delay() from the /train endpoint when the client asks for
+    Celery-backed execution instead of the default in-process BackgroundTasks.
+
+    This is a thin delegate to model_service.train_model_async — the same,
+    already-tested training path used by the in-process (BackgroundTasks)
+    execution mode, so there's exactly one place that does data prep, AutoML
+    fitting, explainability, and model persistence. Task-status updates go
+    through model_service._set_task_status, which mirrors them to Redis so
+    the API process's GET /tasks/{id}/status can see progress written by this
+    worker process, not just tasks run in its own process.
 
     Args:
         task_id: Unique task identifier
@@ -36,125 +48,63 @@ def train_model_task(
         task_type: 'classification', 'regression', or 'auto'
         test_size: Proportion for test set
         experiment_name: MLflow experiment name
+        use_h2o: Whether to try the H2O cluster first when available
+        h2o_max_runtime_secs: Search budget when H2O is used for training
+        use_flaml: Whether to use FLAML's in-process AutoML search
+        flaml_time_budget_secs: Search budget when FLAML is used for training
     """
     try:
         logger.info(
-            f"[Task {task_id}] Starting AutoML training for dataset {dataset_id}"
+            f"[Task {task_id}] Starting AutoML training (celery worker) for dataset {dataset_id}"
         )
 
-        # Update progress
-        self.update_state(
-            state="PROGRESS", meta={"progress": 10, "message": "Loading dataset..."}
-        )
-
-        # Load dataset
         dataset_df = model_service.get_dataset(dataset_id)
 
         if target_column not in dataset_df.columns:
             raise ValueError(f"Target column '{target_column}' not found in dataset")
 
-        # Update progress
-        self.update_state(
-            state="PROGRESS", meta={"progress": 20, "message": "Preprocessing data..."}
+        model_service.train_model_async(
+            task_id=task_id,
+            dataset_df=dataset_df,
+            target_column=target_column,
+            dataset_id=dataset_id,
+            task_type=task_type,
+            test_size=test_size,
+            experiment_name=experiment_name,
+            use_h2o=use_h2o,
+            h2o_max_runtime_secs=h2o_max_runtime_secs,
+            use_flaml=use_flaml,
+            flaml_time_budget_secs=flaml_time_budget_secs,
         )
 
-        # Data preprocessing
-        cleaner = DataCleaner(dataset_df)
-        cleaned_df = cleaner.handle_missing_values(strategy="mean")
+        status = model_service.get_task_status(task_id) or {}
+        if status.get("status") == "failed":
+            raise RuntimeError(status.get("error", "Training failed"))
 
-        # Separate features and target
-        X = cleaned_df.drop(columns=[target_column])
-        y = cleaned_df[target_column]
-
-        # Feature engineering
-        engineer = FeatureEngineer(X)
-        X_encoded = engineer.encode_categorical(method="label")
-
-        # Update progress
-        self.update_state(
-            state="PROGRESS", meta={"progress": 30, "message": "Training models..."}
-        )
-
-        # Initialize and train AutoML
-        automl = AutoML(task_type=task_type, test_size=test_size)
-        results = automl.fit(
-            X_encoded, y, dataset_id=dataset_id, experiment_name=experiment_name
-        )
-
-        # Update progress
-        self.update_state(
-            state="PROGRESS",
-            meta={"progress": 80, "message": "Generating explanations..."},
-        )
-
-        # Create explainer safely (SHAP doesn't understand H2O models, so fall back
-        # to the variable importance H2O itself computed during training)
-        explainer = None
-        try:
-            sample_size = min(100, len(X_encoded))
-            explainer = ModelExplainer(
-                automl.best_model, X_encoded.sample(sample_size)
-            )
-        except Exception as explainer_err:
-            logger.warning(f"Could not initialize explainer for best model: {explainer_err}")
-        variable_importance = results.get("variable_importance") or getattr(
-            automl, "variable_importance", None
-        )
-
-        # Save model
-        model_id = task_id
-        model_path = Path("models") / f"{model_id}.joblib"
-        model_path.parent.mkdir(exist_ok=True)
-        automl.save_model(str(model_path))
-
-        # Store in model service
-        model_service.models[model_id] = {
-            "automl": automl,
-            "model": automl.best_model,
-            "explainer": explainer,
-            "variable_importance": variable_importance,
-            "X_sample": X_encoded.sample(min(100, len(X_encoded))),
-            "feature_names": X_encoded.columns.tolist(),
-            "target_column": target_column,
-            "task_type": results["task_type"],
-            "engine": results.get("engine", "sklearn"),
-            "best_model_name": results["best_model"],
-            "best_score": results["best_score"],
-            "all_results": results["all_results"],
-        }
-
-        # Update task status in model service
-        model_service.tasks[task_id] = {
-            "status": "completed",
-            "message": f"Training completed. Best model: {results['best_model']}",
-            "progress": 100,
-            "model_id": model_id,
-            "results": results,
-        }
-
+        results = status.get("results", {})
         logger.info(f"[Task {task_id}] Training completed successfully")
 
         return {
             "status": "completed",
             "task_id": task_id,
-            "model_id": model_id,
-            "best_model": results["best_model"],
-            "best_score": results["best_score"],
-            "message": f"Training completed with {results['best_model']} (score: {results['best_score']:.4f})",
+            "model_id": status.get("model_id"),
+            "best_model": results.get("best_model"),
+            "best_score": results.get("best_score"),
+            "message": status.get("message"),
         }
 
     except Exception as e:
         logger.error(f"[Task {task_id}] Training failed: {e}")
-
-        # Update task status
-        if task_id in model_service.tasks:
-            model_service.tasks[task_id] = {
+        # train_model_async already writes a "failed" task status on its own
+        # exceptions; this covers failures before that point (e.g. bad dataset_id).
+        existing = model_service.get_task_status(task_id)
+        if existing is None or existing.get("status") != "failed":
+            model_service._set_task_status(task_id, {
                 "status": "failed",
                 "message": f"Training failed: {str(e)}",
                 "progress": 0,
                 "error": str(e),
-            }
-
+            })
         raise
 
 

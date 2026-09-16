@@ -31,6 +31,7 @@ class TrainModelRequest(BaseModel):
     h2o_max_runtime_secs: int = 180  # search budget when H2O is used for training
     use_flaml: bool = False  # opt-in in-process AutoML alternative to H2O
     flaml_time_budget_secs: int = 180  # search budget when FLAML is used for training
+    use_celery: bool = False  # dispatch to the Celery worker instead of running in-process
 
 
 class TrainModelResponse(BaseModel):
@@ -57,7 +58,10 @@ class ModelMetricsResponse(BaseModel):
     model_id: str
     best_model: str
     metrics: Dict[str, Any]
-    all_models: Dict[str, Dict[str, float]]
+    # Shape varies by engine: sklearn/FLAML store a flat {metric: float} dict
+    # per model, while H2O stores {"model_name": str, "metrics": {...}} per
+    # model -- Any accommodates both instead of forcing H2O's into floats.
+    all_models: Dict[str, Any]
 
 
 class ExplainRequest(BaseModel):
@@ -114,26 +118,49 @@ async def train_model(request: TrainModelRequest, background_tasks: BackgroundTa
 
         task_id = f"model_{request.dataset_id[:8]}_{target_col}_{str(uuid.uuid4())[:6]}"
 
-        # Add background task
-        background_tasks.add_task(
-            model_service.train_model_async,
-            task_id=task_id,
-            dataset_df=dataset_df,
-            target_column=target_col,
-            dataset_id=request.dataset_id,
-            task_type=request.task_type,
-            test_size=request.test_size,
-            experiment_name=request.experiment_name,
-            use_h2o=request.use_h2o,
-            h2o_max_runtime_secs=request.h2o_max_runtime_secs,
-            use_flaml=request.use_flaml,
-            flaml_time_budget_secs=request.flaml_time_budget_secs,
-        )
+        if request.use_celery:
+            # Dispatch to the Celery worker (separate process/container, see
+            # docker-compose.yml's celery_worker service) instead of running
+            # in-process. The worker re-loads the dataset itself by ID rather
+            # than receiving the DataFrame, since Celery task args must be
+            # JSON-serializable over the Redis broker.
+            from ..tasks import train_model_task
+
+            train_model_task.delay(
+                task_id=task_id,
+                dataset_id=request.dataset_id,
+                target_column=target_col,
+                task_type=request.task_type,
+                test_size=request.test_size,
+                experiment_name=request.experiment_name,
+                use_h2o=request.use_h2o,
+                h2o_max_runtime_secs=request.h2o_max_runtime_secs,
+                use_flaml=request.use_flaml,
+                flaml_time_budget_secs=request.flaml_time_budget_secs,
+            )
+        else:
+            # Default: run in-process on this API server via FastAPI's own
+            # background-task mechanism (no separate worker needed).
+            background_tasks.add_task(
+                model_service.train_model_async,
+                task_id=task_id,
+                dataset_df=dataset_df,
+                target_column=target_col,
+                dataset_id=request.dataset_id,
+                task_type=request.task_type,
+                test_size=request.test_size,
+                experiment_name=request.experiment_name,
+                use_h2o=request.use_h2o,
+                h2o_max_runtime_secs=request.h2o_max_runtime_secs,
+                use_flaml=request.use_flaml,
+                flaml_time_budget_secs=request.flaml_time_budget_secs,
+            )
 
         return TrainModelResponse(
             task_id=task_id,
             status="started",
-            message=f"Training initiated for dataset {request.dataset_id}",
+            message=f"Training initiated for dataset {request.dataset_id}"
+            + (" (celery worker)" if request.use_celery else ""),
         )
 
     except HTTPException:
