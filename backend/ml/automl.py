@@ -50,6 +50,9 @@ class AutoML:
         h2o_max_runtime_secs: int = 180,
         use_flaml: bool = False,
         flaml_time_budget_secs: int = 180,
+        use_autogluon: bool = False,
+        autogluon_time_limit: int = 180,
+        autogluon_presets: str = "medium_quality",
     ):
         """
         Initialize AutoML engine
@@ -63,6 +66,10 @@ class AutoML:
                 available. Opt-in and off by default; if both use_h2o and
                 use_flaml are True, H2O is tried first (existing behavior) and
                 FLAML is only used if H2O is unavailable or fails.
+            use_autogluon: Whether to use the AutoGluon microservice container
+                for deep multi-layer stack ensembling.
+            autogluon_time_limit: Maximum training runtime budget in seconds for AutoGluon.
+            autogluon_presets: AutoGluon quality preset (e.g. 'medium_quality', 'best_quality').
         """
         self.task_type = task_type
         self.test_size = test_size
@@ -71,6 +78,9 @@ class AutoML:
         self.h2o_max_runtime_secs = h2o_max_runtime_secs
         self.use_flaml = use_flaml
         self.flaml_time_budget_secs = flaml_time_budget_secs
+        self.use_autogluon = use_autogluon
+        self.autogluon_time_limit = autogluon_time_limit
+        self.autogluon_presets = autogluon_presets
         self.best_model = None
         self.best_model_name = None
         self.best_score = None
@@ -79,9 +89,11 @@ class AutoML:
         self.date_column = None  # For time-series tasks
         self.mojo_path = None
         self.variable_importance = None
+        self.leaderboard = None
 
         logger.info(
-            f"Initialized AutoML with task_type={task_type}, test_size={test_size}, use_h2o={use_h2o}"
+            f"Initialized AutoML with task_type={task_type}, test_size={test_size}, "
+            f"use_h2o={use_h2o}, use_flaml={use_flaml}, use_autogluon={use_autogluon}"
         )
 
     def detect_task_type(self, X: pd.DataFrame, y: pd.Series) -> str:
@@ -477,6 +489,50 @@ class AutoML:
             return self._fit_timeseries(
                 X, y, dataset_id, experiment_name, log_artifacts=log_artifacts
             )
+
+        # Check AutoGluon microservice availability
+        if self.use_autogluon and self.task_type != "time_series":
+            try:
+                from .autogluon_engine import is_autogluon_available, AutoGluonEngine
+                if is_autogluon_available():
+                    logger.info("AutoGluon service is available. Executing deep AutoML stacking...")
+                    engine = AutoGluonEngine(
+                        task_type=self.task_type,
+                        time_limit=self.autogluon_time_limit,
+                        presets=self.autogluon_presets,
+                    )
+                    ag_res = engine.fit(
+                        X,
+                        y,
+                        task_type=self.task_type,
+                        dataset_id=dataset_id,
+                        experiment_name=experiment_name,
+                        log_artifacts=log_artifacts,
+                    )
+                    self.best_model_name = ag_res["best_model"]
+                    self.best_model = ag_res["model"]
+                    self.best_score = ag_res["best_score"]
+                    self.task_type = ag_res["task_type"]
+                    self.results = ag_res["all_results"]
+                    self.leaderboard = ag_res.get("leaderboard")
+                    self.models = {ag_res["best_model"]: ag_res["model"]}
+                    self.feature_names = ag_res["feature_names"]
+                    self.variable_importance = ag_res.get("variable_importance")
+                    return {
+                        "engine": "autogluon",
+                        "best_model": self.best_model_name,
+                        "best_score": self.best_score,
+                        "all_results": ag_res["all_results"],
+                        "leaderboard": self.leaderboard,
+                        "task_type": self.task_type,
+                        "model_path": ag_res.get("model_path"),
+                        "variable_importance": self.variable_importance,
+                        "run_id": ag_res.get("run_id"),
+                    }
+            except Exception as exc:
+                logger.warning(
+                    f"AutoGluon execution attempt failed ({exc}). Falling back..."
+                )
 
         # Check H2O cluster availability
         if self.use_h2o and self.task_type != "time_series":

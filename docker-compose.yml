@@ -9,6 +9,7 @@ services:
     environment:
       - PYTHONPATH=/app:/app/backend:.
       - H2O_URL=http://h2o:54321
+      - AUTOGLUON_URL=http://autogluon:8010
     depends_on:
       redis:
         condition: service_healthy
@@ -40,6 +41,7 @@ services:
     environment:
       - PYTHONPATH=/app:/app/backend:.
       - H2O_URL=http://h2o:54321
+      - AUTOGLUON_URL=http://autogluon:8010
     depends_on:
       redis:
         condition: service_healthy
@@ -72,6 +74,27 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  autogluon:
+    image: ai-decision-autogluon:latest
+    build:
+      context: .
+      dockerfile: autogluon/Dockerfile
+    ports:
+      - "8010:8010"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODELS_DIR=/app/models
+    volumes:
+      - uploads:/app/uploads
+      - models_data:/app/models
+      - mlflow_data:/app/mlops
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   h2o:
     # Despite the "-k8s" tag, this is H2O.ai's standard minimal open-source H2O-3 image
@@ -145,6 +168,7 @@ services:
       - BACKEND_URL=http://backend:8000
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - H2O_URL=http://h2o:54321
+      - AUTOGLUON_URL=http://autogluon:8010
     volumes:
       - ./notebooks:/app/notebooks
       - ./models:/app/models
@@ -179,6 +203,7 @@ services:
       - DECISERA_BACKEND_URL=http://backend:8000
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - H2O_URL=http://h2o:54321
+      - AUTOGLUON_URL=http://autogluon:8010
     # Each `hermes --tui` session (docker exec) spawns its own Node+Python
     # stack (~450-500MB) that isn't torn down automatically when sessions are
     # left open -- cap the container so an accumulation of stale sessions

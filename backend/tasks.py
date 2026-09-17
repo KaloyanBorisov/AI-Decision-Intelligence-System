@@ -26,6 +26,9 @@ def train_model_task(
     h2o_max_runtime_secs: int = 180,
     use_flaml: bool = False,
     flaml_time_budget_secs: int = 180,
+    use_autogluon: bool = False,
+    autogluon_time_limit: int = 180,
+    autogluon_presets: str = "medium_quality",
 ):
     """
     Async Celery task for model training. Runs in a separate `celery_worker`
@@ -52,6 +55,9 @@ def train_model_task(
         h2o_max_runtime_secs: Search budget when H2O is used for training
         use_flaml: Whether to use FLAML's in-process AutoML search
         flaml_time_budget_secs: Search budget when FLAML is used for training
+        use_autogluon: Whether to use the AutoGluon microservice container
+        autogluon_time_limit: Search budget for AutoGluon training
+        autogluon_presets: AutoGluon quality preset
     """
     try:
         logger.info(
@@ -75,6 +81,9 @@ def train_model_task(
             h2o_max_runtime_secs=h2o_max_runtime_secs,
             use_flaml=use_flaml,
             flaml_time_budget_secs=flaml_time_budget_secs,
+            use_autogluon=use_autogluon,
+            autogluon_time_limit=autogluon_time_limit,
+            autogluon_presets=autogluon_presets,
         )
 
         status = model_service.get_task_status(task_id) or {}

@@ -76,7 +76,8 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
 │  - JWT Bearer Authentication & PBKDF2 / Bcrypt hashing      │
 │  - Presentation / API Routing Layer (`backend/api/`)         │
 │  - Service & Business Logic Layer (`backend/services/`)     │
-│  - Dual AutoML engines: H2O cluster & in-process FLAML       │
+│  - Triple AutoML engines: H2O cluster, in-process FLAML &   │
+│    AutoGluon microservice                                    │
 │  - Selectable execution mode per /train request:             │
 │    in-process (FastAPI BackgroundTasks) or Celery worker    │
 └──────────────┬───────────────────────────────┬──────────────┘
@@ -142,9 +143,9 @@ Decisera follows a **Microservices-based MLOps & Decision Intelligence Architect
 5. **AI Pattern — ReAct / Tool-Augmented AI Copilot (RAG):**
    - The AI Copilot (`backend/copilot/`) functions as an autonomous tool-calling agent. It inspects datasets, runs statistical tools, retrieves domain context via RAG, and generates plain-language business recommendations.
 
-6. **AutoML Engine Selection — H2O vs. FLAML:**
-   - Decisera supports two interchangeable AutoML backends selectable per training request: the existing **H2O** cluster (`backend/ml/h2o_engine.py`) and an in-process **FLAML** engine, with automatic fallback to scikit-learn when neither is requested or available.
-   - This keeps training available even when the H2O Java process is unhealthy or the deployment target can't run a separate H2O container, at the cost of FLAML/sklearn generally searching a narrower model space than H2O's cluster-backed AutoML.
+6. **AutoML Engine Selection — H2O vs. FLAML vs. AutoGluon:**
+   - Decisera supports three interchangeable AutoML backends selectable per training request: the **H2O** cluster (`backend/ml/h2o_engine.py`), an in-process **FLAML** engine, and the **AutoGluon** microservice (`autogluon/`, deep multi-layer stack ensembling), with automatic fallback to scikit-learn when none are requested or available.
+   - This keeps training available even when the H2O Java process is unhealthy or a given engine's container can't run in the deployment target, at the cost of FLAML/sklearn generally searching a narrower model space than H2O's or AutoGluon's cluster/ensemble-backed AutoML.
 
 7. **Optional Agent Sidecar — Hermes:**
    - An optional `hermes` container runs a long-lived TUI-based coding/ops agent alongside the stack, with read access to the `uploads` and `models` volumes and network access to the backend API and MLflow — useful for interactively inspecting or operating on the running deployment without a separate host shell.
@@ -228,6 +229,64 @@ The entire Decisera platform is containerized and verified to run end-to-end via
 docker compose up --build -d
 ```
 
+### Container Topology
+
+All 10 services below are defined in [`docker-compose.yml`](docker-compose.yml). Solid arrows are live HTTP/REST calls between containers; dashed arrows are the Redis task-status mirror that lets both `backend` and `celery_worker` answer `GET /tasks/{id}/status` regardless of which process ran the job.
+
+```mermaid
+flowchart TB
+    subgraph Client["Client Layer"]
+        FE["frontend :3000<br/>React 18 + TS (Nginx)"]
+        JN["jupyter :8888<br/>JupyterLab sandbox"]
+    end
+
+    subgraph Core["Backend &amp; Async Workers"]
+        BE["backend :8000<br/>FastAPI orchestrator<br/>(+ in-process FLAML engine)"]
+        CW["celery_worker<br/>same image, worker mode"]
+        RD[("redis :6379<br/>broker + task-status cache")]
+    end
+
+    subgraph Engines["AutoML Engine Containers"]
+        H2O["h2o :54321<br/>H2O-3 AutoML cluster"]
+        AG["autogluon :8010<br/>stacked-ensemble microservice"]
+    end
+
+    subgraph MLOps["MLOps Registry"]
+        MLF["mlflow :5000<br/>experiment &amp; artifact store"]
+        GC["mlflow-gc<br/>daily mlflow gc sidecar"]
+    end
+
+    subgraph Sidecar["Optional Sidecar"]
+        HM["hermes<br/>TUI ops agent (read-only)"]
+    end
+
+    FE -->|HTTPS / REST| BE
+    JN -->|REST /api/v1| BE
+    HM -->|REST /api/v1| BE
+
+    BE -->|"use_celery=true: .delay()"| RD
+    CW -->|dequeues training tasks| RD
+    BE -.->|mirrors task status| RD
+    CW -.->|mirrors task status| RD
+
+    BE -->|use_h2o| H2O
+    CW -->|use_h2o| H2O
+    BE -->|use_autogluon| AG
+    CW -->|use_autogluon| AG
+
+    BE -->|log params/metrics/artifacts| MLF
+    CW -->|log params/metrics/artifacts| MLF
+    AG -->|log params/metrics/artifacts| MLF
+    GC -->|"mlflow gc: purge soft-deleted runs"| MLF
+
+    classDef svc fill:#1f2937,stroke:#4b5563,color:#e5e7eb;
+    classDef store fill:#0f172a,stroke:#334155,color:#93c5fd;
+    class FE,JN,BE,CW,H2O,AG,MLF,GC,HM svc;
+    class RD store;
+```
+
+Not pictured to keep the diagram legible: seven named volumes (`uploads`, `models_data`, `storage_data`, `mlflow_data`, `redis_data`, `h2o_data`, `hermes_data`) shared read/write across `backend`, `celery_worker`, `h2o`, `autogluon`, `jupyter`, and read-only by `hermes` — see the `volumes:` blocks in [`docker-compose.yml`](docker-compose.yml) for the exact mapping per service.
+
 ### Verified Container Network & Ports
 | Container | Image Tag | Host Port | Health Check |
 |:---|:---|:---|:---|
@@ -235,8 +294,12 @@ docker compose up --build -d
 | `celery_worker` | `ai-decision-backend:latest` | — | Consumes training tasks from Redis (`use_celery=true` on `/train`); no worker running means those tasks queue but never execute |
 | `frontend` | `ai-decision-frontend:latest` | `3000` | Nginx Static Server + Internal Network Routing |
 | `redis` | `redis:alpine` | `6379` | `redis-cli ping` (PONG) |
-| `mlflow` | `ghcr.io/mlflow/mlflow` | `5000` | Artifact & Experiment Registry |
-| `hermes` | `ai-decision-hermes:latest` | — | Optional long-running agent sidecar with read access to `uploads`/`models` volumes |
+| `h2o` | `h2oai/h2o-open-source-k8s:3.46.0.1` | `54321` | `curl -f http://localhost:54321/3/About` (HTTP 200) |
+| `autogluon` | `ai-decision-autogluon:latest` | `8010` | `curl -f http://localhost:8010/health` (HTTP 200) |
+| `mlflow` | `ghcr.io/mlflow/mlflow:v3.16.0` | `5000` | Artifact & Experiment Registry |
+| `mlflow-gc` | `ghcr.io/mlflow/mlflow:v3.16.0` | — | No HTTP surface; runs `mlflow gc` against the shared `mlflow_data` volume once a day to reclaim soft-deleted runs |
+| `jupyter` | `ai-decision-jupyter:latest` | `8888` | JupyterLab sandbox with the same volumes as `backend`, for interactive notebook work |
+| `hermes` | `ai-decision-hermes:latest` | — | Optional long-running agent sidecar with read-only access to `uploads`/`models` volumes |
 
 ### Verifying Container Health
 ```bash

@@ -273,6 +273,9 @@ class ModelService:
         h2o_max_runtime_secs: int = 180,
         use_flaml: bool = False,
         flaml_time_budget_secs: int = 180,
+        use_autogluon: bool = False,
+        autogluon_time_limit: int = 180,
+        autogluon_presets: str = "medium_quality",
     ):
         """
         Train model asynchronously (to be called as background task)
@@ -305,6 +308,9 @@ class ModelService:
                 h2o_max_runtime_secs=h2o_max_runtime_secs,
                 use_flaml=use_flaml,
                 flaml_time_budget_secs=flaml_time_budget_secs,
+                use_autogluon=use_autogluon,
+                autogluon_time_limit=autogluon_time_limit,
+                autogluon_presets=autogluon_presets,
             )
 
             # Update progress
@@ -741,6 +747,7 @@ class ModelService:
             # backend-store/artifact-root to actually reclaim the disk
             # space, since the REST client can only mark runs deleted.
             mlflow_run_id = model_info.get("mlflow_run_id")
+            mlflow_experiment_name = model_info.get("mlflow_experiment_name")
             if mlflow_run_id:
                 try:
                     from mlflow.tracking import MlflowClient
@@ -752,6 +759,34 @@ class ModelService:
             del self.models[model_id]
             cache_delete(f"model:{model_id}")
             logger.info(f"Model {model_id} deleted")
+
+            # An experiment (e.g. "AutoML_Engine_Comparison_H2O") is a shared
+            # container that other models may still be training under, so it's
+            # only safe to remove once nothing in the registry references it
+            # any more -- deleting a run above never touches its parent
+            # experiment. If every model that used it is gone, soft-delete the
+            # (now-orphaned) experiment too; MLflow recreates it automatically
+            # the next time a training run uses that experiment_name.
+            if mlflow_experiment_name:
+                still_in_use = any(
+                    row.get("mlflow_experiment_name") == mlflow_experiment_name
+                    for row in models_storage.all()
+                )
+                if not still_in_use:
+                    try:
+                        from mlflow.tracking import MlflowClient
+                        client = MlflowClient()
+                        experiment = client.get_experiment_by_name(mlflow_experiment_name)
+                        if experiment is not None and experiment.lifecycle_stage != "deleted":
+                            client.delete_experiment(experiment.experiment_id)
+                            logger.info(
+                                f"Marked MLflow experiment '{mlflow_experiment_name}' deleted "
+                                f"(no remaining models reference it)"
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Could not delete MLflow experiment '{mlflow_experiment_name}': {exc}"
+                        )
 
 
 # Singleton instance

@@ -1,6 +1,10 @@
 FROM ai-decision-backend:latest
 
-RUN pip install --no-cache-dir jupyterlab notebook ipywidgets seaborn
+# tornado>=6.5 changed StaticFileHandler to require self.allowed_symlink_directory,
+# which jupyter_server's FileFindHandler.initialize() doesn't set -- that mismatch
+# 500s every /static/* asset request and leaves JupyterLab's UI blank. Pin tornado
+# below 6.5 until jupyter_server ships a fix.
+RUN pip install --no-cache-dir jupyterlab notebook ipywidgets seaborn "tornado<6.5"
 
 WORKDIR /app
 

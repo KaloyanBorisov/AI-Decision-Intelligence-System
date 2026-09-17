@@ -31,6 +31,9 @@ class TrainModelRequest(BaseModel):
     h2o_max_runtime_secs: int = 180  # search budget when H2O is used for training
     use_flaml: bool = False  # opt-in in-process AutoML alternative to H2O
     flaml_time_budget_secs: int = 180  # search budget when FLAML is used for training
+    use_autogluon: bool = False  # opt-in AutoGluon microservice container
+    autogluon_time_limit: int = 180  # search budget when AutoGluon is used
+    autogluon_presets: str = "medium_quality"  # AutoGluon quality preset
     use_celery: bool = False  # dispatch to the Celery worker instead of running in-process
 
 
@@ -137,6 +140,9 @@ async def train_model(request: TrainModelRequest, background_tasks: BackgroundTa
                 h2o_max_runtime_secs=request.h2o_max_runtime_secs,
                 use_flaml=request.use_flaml,
                 flaml_time_budget_secs=request.flaml_time_budget_secs,
+                use_autogluon=request.use_autogluon,
+                autogluon_time_limit=request.autogluon_time_limit,
+                autogluon_presets=request.autogluon_presets,
             )
         else:
             # Default: run in-process on this API server via FastAPI's own
@@ -154,6 +160,9 @@ async def train_model(request: TrainModelRequest, background_tasks: BackgroundTa
                 h2o_max_runtime_secs=request.h2o_max_runtime_secs,
                 use_flaml=request.use_flaml,
                 flaml_time_budget_secs=request.flaml_time_budget_secs,
+                use_autogluon=request.use_autogluon,
+                autogluon_time_limit=request.autogluon_time_limit,
+                autogluon_presets=request.autogluon_presets,
             )
 
         return TrainModelResponse(

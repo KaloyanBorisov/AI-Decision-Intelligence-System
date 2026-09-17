@@ -71,6 +71,13 @@ class Settings(BaseSettings):
         description="H2O cluster URL for AutoML training",
     )
 
+    # AutoGluon
+    autogluon_url: str = Field(
+        default="http://localhost:8010",
+        validation_alias=AliasChoices("AUTOGLUON_URL", "autogluon_url"),
+        description="AutoGluon microservice URL for AutoML training and inference",
+    )
+
     # OpenAI
     openai_api_key: str = ""
 
